@@ -131,9 +131,9 @@ def save_pseudobulk_data(pbulk_adata, base_filename):
     @param base_filename: Base name for output files
     """
     print(f"Saving {base_filename} data...")
-    pbulk_adata.write_h5ad(f'{base_filename}_adata.h5ad')
-    pbulk_adata.obs.to_csv(f'{base_filename}_metadata.csv', index=True)
-    pbulk_adata.var.to_csv(f'{base_filename}_features.csv', index=True)
+    pbulk_adata.write_h5ad(f'data/{base_filename}_adata.h5ad')
+    pbulk_adata.obs.to_csv(f'data/{base_filename}_metadata.csv', index=True)
+    pbulk_adata.var.to_csv(f'data/{base_filename}_features.csv', index=True)
     print(f"{base_filename} data saved")
 
 def save_expression_matrix(adata, output_filename):
@@ -145,10 +145,16 @@ def save_expression_matrix(adata, output_filename):
     """
     print(f"Saving expression matrix to {output_filename}...")
     
+    # Get the index values - either from donor_id column or index
+    if 'donor_id' in adata.obs.columns:
+        index_values = adata.obs['donor_id'].values
+    else:
+        index_values = adata.obs.index.values
+    
     # Convert X to a DataFrame
     expression_df = pd.DataFrame(
         adata.X.toarray() if hasattr(adata.X, "toarray") else adata.X,
-        index=adata.obs['donor_id'].values,  # Use donor_id column instead of index
+        index=index_values,  # Use either donor_id column or index
         columns=adata.var_names  # gene names
     )
     
@@ -235,12 +241,11 @@ def create_weighted_pseudobulk(adata):
     
     # Create observation dataframe with cell counts
     obs_df = pd.DataFrame(donor_metadata)
-    obs_df = obs_df.set_index('donor_id')
     
     weighted_pbulk = ad.AnnData(
         X=np.vstack(donor_profiles),
         var=adata.var.copy(),
-        obs=obs_df,
+        obs=obs_df,  # Don't set index here
         uns={
             'celltype_matrices': celltype_matrices,
             'donor_celltype_pairs': donor_celltype_pairs
@@ -251,7 +256,7 @@ def create_weighted_pseudobulk(adata):
 
 if __name__ == '__main__':
     # Load data
-    adata = load_data('08984b3c-3189-4732-be22-62f1fe8f15a4.h5ad')
+    adata = load_data('data/08984b3c-3189-4732-be22-62f1fe8f15a4.h5ad')
     
     # Get summary statistics
     stats = get_summary(adata)
@@ -261,13 +266,13 @@ if __name__ == '__main__':
     pseudobulk_adata = create_pseudobulk(adata)
     save_pseudobulk_data(pseudobulk_adata, 'pseudobulk')
     print("Pseudobulk shape:", pseudobulk_adata.X.shape)
-    save_expression_matrix(pseudobulk_adata, 'pseudobulk_expression.csv')
+    save_expression_matrix(pseudobulk_adata, 'data/pseudobulk_expression.csv')
     
     # Create weighted pseudobulk
     weighted_pbulk = create_weighted_pseudobulk(adata)
     save_pseudobulk_data(weighted_pbulk, 'weighted_pseudobulk')
     print("Weighted pseudobulk shape:", weighted_pbulk.X.shape)
-    save_expression_matrix(weighted_pbulk, 'weighted_pseudobulk_expression.csv')
+    save_expression_matrix(weighted_pbulk, 'data/weighted_pseudobulk_expression.csv')
 
     # Get matrix for a specific donor and cell type
     print(get_specific_cell_matrix(pseudobulk_adata, '1_1', 'natural killer cell'))
