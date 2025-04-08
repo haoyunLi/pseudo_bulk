@@ -49,9 +49,10 @@ def get_celltype_specific_gene_matrix(adata, donor_id, cell_type):
     @param cell_type: Cell type to extract
     @return: Gene expression matrix for the specified donor and cell type
     """
-    matrix = (adata.obs['donor_id'] == donor_id) & (adata.obs['cell_type'] == cell_type)
+    # Create boolean filter for donor and cell type
+    donor_celltype_filter = ((adata.obs['donor_id'] == donor_id) & (adata.obs['cell_type'] == cell_type)).values
     # Convert matrix to numpy array if it's a matrix type
-    result = adata.X[matrix].copy() if not isinstance(adata.X, np.ndarray) else adata.X[matrix]
+    result = adata.X[donor_celltype_filter].copy() if not isinstance(adata.X, np.ndarray) else adata.X[donor_celltype_filter]
     if isinstance(result, np.matrix):
         result = np.array(result)
     return result
