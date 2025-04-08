@@ -2,7 +2,7 @@ import haiku as hk
 import jax
 import jax.numpy as jnp
 import pandas as pd
-
+import numpy as np
 from multiomics_open_research.bulk_rna_bert.pretrained import get_pretrained_model
 from multiomics_open_research.bulk_rna_bert.preprocess import preprocess_rna_seq_for_bulkrnabert
 
@@ -26,3 +26,14 @@ outs = forward_fn.apply(parameters, random_key, tokens)
 
 # Get mean embeddings from layer 4
 mean_embedding = outs["embeddings_4"].mean(axis=1)
+
+# Convert to numpy array and save to file
+mean_embedding_np = np.array(mean_embedding)
+np.save('data/mean_embeddings.npy', mean_embedding_np)
+
+# Also save as CSV with donor IDs as index
+mean_embedding_df = pd.DataFrame(
+    mean_embedding_np,
+    index=rna_seq_df.index
+)
+mean_embedding_df.to_csv('data/mean_embeddings.csv')
