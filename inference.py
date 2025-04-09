@@ -10,7 +10,7 @@ from multiomics_open_research.bulk_rna_bert.preprocess import preprocess_rna_seq
 parameters, forward_fn, tokenizer, config = get_pretrained_model(
     model_name="bulk_rna_bert_tcga",
     embeddings_layers_to_save=(4,),
-    checkpoint_directory="multiomics_open_research/checkpoints/",
+    checkpoint_directory="multiomics-open-research/checkpoints/",
 )
 forward_fn = hk.transform(forward_fn)
 
