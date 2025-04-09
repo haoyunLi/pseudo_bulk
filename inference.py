@@ -15,7 +15,11 @@ parameters, forward_fn, tokenizer, config = get_pretrained_model(
 forward_fn = hk.transform(forward_fn)
 
 # Get bulk RNASeq data and tokenize it
-rna_seq_df = pd.read_csv("data/processed_pseudobulk_expression.csv")
+rna_seq_df = pd.read_csv("data/processed_pseudobulk_expression.csv", index_col=0)
+# Convert all columns to numeric, coercing errors to NaN
+rna_seq_df = rna_seq_df.apply(pd.to_numeric, errors='coerce')
+# Fill any NaN values with 0
+rna_seq_df = rna_seq_df.fillna(0)
 rna_seq_array = preprocess_rna_seq_for_bulkrnabert(rna_seq_df, config)
 tokens_ids = tokenizer.batch_tokenize(rna_seq_array)
 tokens = jnp.asarray(tokens_ids, dtype=jnp.int32)
