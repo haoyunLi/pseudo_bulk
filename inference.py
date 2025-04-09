@@ -39,8 +39,13 @@ all_embeddings = []
 
 print(f"Processing {num_samples} samples in batches of {batch_size}...")
 
+# First, get the embedding dimension by processing a single sample
+test_batch = tokens[:1]
+test_outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), test_batch)
+embedding_dim = test_outs["embeddings_4"].mean(axis=1).shape[1]
+print(f"Embedding dimension: {embedding_dim}")
+
 # Pre-allocate memory for embeddings
-embedding_dim = 768  # Typical BERT embedding dimension
 all_embeddings = np.zeros((num_samples, embedding_dim), dtype=np.float32)
 
 for i in range(0, num_samples, batch_size):
