@@ -5,8 +5,15 @@ import pandas as pd
 import numpy as np
 from multiomics_open_research.bulk_rna_bert.pretrained import get_pretrained_model
 from multiomics_open_research.bulk_rna_bert.preprocess import preprocess_rna_seq_for_bulkrnabert
+import gc
+
+# Configure JAX for memory efficiency
+jax.config.update('jax_platform_name', 'cpu')
+jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
+jax.config.update('jax_enable_x64', False)
 
 # Get pretrained model
+print("Loading pretrained model...")
 parameters, forward_fn, tokenizer, config = get_pretrained_model(
     model_name="bulk_rna_bert_tcga",
     embeddings_layers_to_save=(4,),
@@ -15,6 +22,7 @@ parameters, forward_fn, tokenizer, config = get_pretrained_model(
 forward_fn = hk.transform(forward_fn)
 
 # Get bulk RNASeq data and tokenize it
+print("Loading and preprocessing data...")
 rna_seq_df = pd.read_csv("data/processed_pseudobulk_expression.csv", index_col=0)
 # Convert all columns to numeric, coercing errors to NaN
 rna_seq_df = rna_seq_df.apply(pd.to_numeric, errors='coerce')
@@ -24,10 +32,16 @@ rna_seq_array = preprocess_rna_seq_for_bulkrnabert(rna_seq_df, config)
 tokens_ids = tokenizer.batch_tokenize(rna_seq_array)
 tokens = jnp.asarray(tokens_ids, dtype=jnp.int32)
 
-# Process in batches to avoid memory issues
-batch_size = 32  # Adjust this based on memory
+# Process in very small batches to avoid memory issues
+batch_size = 4  # Reduced batch size
 num_samples = len(tokens)
 all_embeddings = []
+
+print(f"Processing {num_samples} samples in batches of {batch_size}...")
+
+# Pre-allocate memory for embeddings
+embedding_dim = 768  # Typical BERT embedding dimension
+all_embeddings = np.zeros((num_samples, embedding_dim), dtype=np.float32)
 
 for i in range(0, num_samples, batch_size):
     batch_tokens = tokens[i:i + batch_size]
@@ -37,21 +51,27 @@ for i in range(0, num_samples, batch_size):
     outs = forward_fn.apply(parameters, random_key, batch_tokens)
     
     # Get mean embeddings from layer 4 for this batch
-    batch_embeddings = outs["embeddings_4"].mean(axis=1)
-    all_embeddings.append(batch_embeddings)
+    batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1))
+    all_embeddings[i:i + batch_size] = batch_embeddings
     
-    print(f"Processed batch {i//batch_size + 1}/{(num_samples + batch_size - 1)//batch_size}")
+    # Clear memory
+    del outs
+    del batch_embeddings
+    gc.collect()
+    jax.clear_caches()
+    
+    if (i // batch_size) % 10 == 0:  # Print progress every 10 batches
+        print(f"Processed batch {i//batch_size + 1}/{(num_samples + batch_size - 1)//batch_size}")
 
-# Concatenate all embeddings
-mean_embedding = jnp.concatenate(all_embeddings, axis=0)
-
-# Convert to numpy array and save to file
-mean_embedding_np = np.array(mean_embedding)
-np.save('data/mean_embeddings.npy', mean_embedding_np)
+print("Saving results...")
+# Save embeddings
+np.save('data/mean_embeddings.npy', all_embeddings)
 
 # Also save as CSV with donor IDs as index
 mean_embedding_df = pd.DataFrame(
-    mean_embedding_np,
+    all_embeddings,
     index=rna_seq_df.index
 )
 mean_embedding_df.to_csv('data/mean_embeddings.csv')
+
+print("Done!")
