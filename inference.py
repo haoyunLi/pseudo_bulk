@@ -23,7 +23,7 @@ forward_fn = hk.transform(forward_fn)
 
 # Get bulk RNASeq data and tokenize it
 print("Loading and preprocessing data...")
-rna_seq_df = pd.read_csv("data/processed_pseudobulk_expression.csv", index_col=0)
+rna_seq_df = pd.read_csv("data/processed_pseudobulk_expression_NW.csv", index_col=0)
 # Convert all columns to numeric, coercing errors to NaN
 rna_seq_df = rna_seq_df.apply(pd.to_numeric, errors='coerce')
 # Fill any NaN values with 0
@@ -70,13 +70,13 @@ for i in range(0, num_samples, batch_size):
 
 print("Saving results...")
 # Save embeddings
-np.save('data/mean_embeddings.npy', all_embeddings)
+np.save('data/mean_embeddings_NW.npy', all_embeddings)
 
 # Also save as CSV with donor IDs as index
 mean_embedding_df = pd.DataFrame(
     all_embeddings,
     index=rna_seq_df.index
 )
-mean_embedding_df.to_csv('data/mean_embeddings.csv')
+mean_embedding_df.to_csv('data/mean_embeddings_NW.csv')
 
 print("Done!")
