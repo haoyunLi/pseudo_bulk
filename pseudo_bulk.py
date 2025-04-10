@@ -72,24 +72,35 @@ def calculate_cell_fractions(grouped):
 
 def create_pseudobulk(adata):
     """
-    Create pseudobulk data aggregated by donor_id and cell_type.
+    Create pseudobulk data aggregated by donor_id.
     CPM normalized expression values are used.
+    Cell type-specific matrices are stored in uns['celltype_matrices'].
     
     @param adata: AnnData single-cell RNA-seq data with donor_id and cell_type in obs
-    @return: AnnData Pseudobulk data with donor_id and cell_type_info and cell type fractions
+    @return: AnnData Pseudobulk data with donor_id and aggregated expression values
     """
     print("Creating pseudobulk data...")
     
-    # Create groupby object for aggregation
-    grouped = adata.obs.groupby(['donor_id', 'cell_type'], observed=True)
-    cell_counts = calculate_cell_fractions(grouped)
+    # Create groupby objects for both donor and donor+celltype
+    donor_grouped = adata.obs.groupby('donor_id', observed=True)
+    donor_celltype_grouped = adata.obs.groupby(['donor_id', 'cell_type'], observed=True)
     
     # Aggregate expression data
     pseudobulk_dict = {}
+    cell_counts = {}
     celltype_matrices = {}
+    donor_celltype_pairs = []
     
-    for (donor, cell_type), group_indices in grouped.indices.items():
-        # Sum expression values
+    # First, store cell type-specific matrices
+    for (donor, cell_type), group_indices in donor_celltype_grouped.indices.items():
+        key = f"{donor}|||{cell_type}"
+        matrix = get_celltype_specific_gene_matrix(adata, donor, cell_type)
+        celltype_matrices[key] = matrix
+        donor_celltype_pairs.append((donor, cell_type))
+    
+    # Then create donor-level pseudobulk
+    for donor, group_indices in donor_grouped.indices.items():
+        # Sum expression values for all cells from this donor
         expr_sum = adata.X[group_indices].sum(axis=0).A1 if not isinstance(adata.X, np.ndarray) else adata.X[group_indices].sum(axis=0)
         
         # Convert to CPM
@@ -99,16 +110,14 @@ def create_pseudobulk(adata):
         else:
             expr_cpm = expr_sum
             
-        pseudobulk_dict[(donor, cell_type)] = expr_cpm
-        
-        # Store cell type matrix
-        key = f"{donor}|||{cell_type}"
-        matrix = get_celltype_specific_gene_matrix(adata, donor, cell_type)
-        celltype_matrices[key] = matrix
+        pseudobulk_dict[donor] = expr_cpm
+        cell_counts[donor] = len(group_indices)
     
     # Create observation dataframe
-    obs_df = pd.DataFrame([key for key in pseudobulk_dict.keys()], columns=['donor_id', 'cell_type'])
-    obs_df = obs_df.merge(cell_counts[['donor_id', 'cell_type', 'n_cells', 'fraction']], on=['donor_id', 'cell_type'])
+    obs_df = pd.DataFrame({
+        'donor_id': list(pseudobulk_dict.keys()),
+        'n_cells': list(cell_counts.values())
+    })
     
     # Create pseudobulk AnnData
     pseudobulk_adata = ad.AnnData(
@@ -117,7 +126,7 @@ def create_pseudobulk(adata):
         var=adata.var.copy(),
         uns={
             'celltype_matrices': celltype_matrices,
-            'donor_celltype_pairs': list(grouped.indices.keys())
+            'donor_celltype_pairs': donor_celltype_pairs
         }
     )
     
@@ -146,16 +155,10 @@ def save_expression_matrix(adata, output_filename):
     """
     print(f"Saving expression matrix to {output_filename}...")
     
-    # Get the index values - either from donor_id column or index
-    if 'donor_id' in adata.obs.columns:
-        index_values = adata.obs['donor_id'].values
-    else:
-        index_values = adata.obs.index.values
-    
-    # Convert X to a DataFrame
+    # Convert X to a DataFrame with proper index
     expression_df = pd.DataFrame(
         adata.X.toarray() if hasattr(adata.X, "toarray") else adata.X,
-        index=index_values,  # Use either donor_id column or index
+        index=adata.obs_names,  # Use the observation names as index
         columns=adata.var_names  # gene names
     )
     
@@ -178,11 +181,7 @@ def get_specific_cell_matrix(bulk_adata, donor, cell_type):
 def create_weighted_pseudobulk(adata):
     """
     Create weighted pseudobulk data per donor using weighted TPM normalization.
-    For each cell type:
-    1. Calculate raw counts
-    2. Apply TPM normalization to raw counts
-    3. Weight by cell type fraction
-    4. Sum weighted TPM values across cell types
+    Cell type-specific matrices are stored in uns['celltype_matrices'].
     
     @param adata: AnnData object containing single-cell data
     @return: AnnData object containing weighted pseudobulk data per donor
@@ -211,7 +210,6 @@ def create_weighted_pseudobulk(adata):
                 ct_expr = np.array(ct_expr).flatten()
             
             # Calculate TPM for this cell type
-            # First normalize by total counts in this cell type
             ct_total = ct_expr.sum()
             if ct_total > 0:
                 ct_tpm = (ct_expr * 1e6) / ct_total
@@ -230,7 +228,7 @@ def create_weighted_pseudobulk(adata):
             # Add to weighted profile
             weighted_profile = ct_weighted if weighted_profile is None else weighted_profile + ct_weighted
         
-        # Store donor profile (no additional normalization needed)
+        # Store donor profile
         donor_profiles.append(weighted_profile.reshape(1, -1))
         
         # Store donor metadata
@@ -240,13 +238,13 @@ def create_weighted_pseudobulk(adata):
             'method': 'weighted_pseudobulk'
         })
     
-    # Create observation dataframe with cell counts
+    # Create observation dataframe
     obs_df = pd.DataFrame(donor_metadata)
     
     weighted_pbulk = ad.AnnData(
         X=np.vstack(donor_profiles),
         var=adata.var.copy(),
-        obs=obs_df,  # Don't set index here
+        obs=obs_df,
         uns={
             'celltype_matrices': celltype_matrices,
             'donor_celltype_pairs': donor_celltype_pairs
