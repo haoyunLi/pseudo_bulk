@@ -70,13 +70,13 @@ for i in range(0, num_samples, batch_size):
 
 print("Saving results...")
 # Save embeddings
-np.save('data/mean_embeddings_NW.npy', all_embeddings)
+np.save('data/mean_embeddings.npy', all_embeddings)
 
 # Also save as CSV with donor IDs as index
 mean_embedding_df = pd.DataFrame(
     all_embeddings,
     index=rna_seq_df.index
 )
-mean_embedding_df.to_csv('data/mean_embeddings_NW.csv')
+mean_embedding_df.to_csv('data/mean_embeddings.csv')
 
 print("Done!")
