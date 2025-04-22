@@ -6,77 +6,122 @@ import numpy as np
 from multiomics_open_research.bulk_rna_bert.pretrained import get_pretrained_model
 from multiomics_open_research.bulk_rna_bert.preprocess import preprocess_rna_seq_for_bulkrnabert
 import gc
+import logging
+import os
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Configure JAX for memory efficiency
 jax.config.update('jax_platform_name', 'cpu')
 jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
 jax.config.update('jax_enable_x64', False)
 
-# Get pretrained model
-print("Loading pretrained model...")
-parameters, forward_fn, tokenizer, config = get_pretrained_model(
-    model_name="bulk_rna_bert_tcga",
-    embeddings_layers_to_save=(4,),
-    checkpoint_directory="multiomics-open-research/checkpoints/",
-)
-forward_fn = hk.transform(forward_fn)
+def process_batch(batch_tokens, parameters, forward_fn, random_key):
+    """Process a single batch of tokens."""
+    try:
+        outs = forward_fn.apply(parameters, random_key, batch_tokens)
+        batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
+        return batch_embeddings
+    except Exception as e:
+        logging.error(f"Error processing batch: {str(e)}")
+        raise
 
-# Get bulk RNASeq data and tokenize it
-print("Loading and preprocessing data...")
-rna_seq_df = pd.read_csv("data/celltype_specific_2d_matrix.csv", index_col=0)
-# Convert all columns to numeric, coercing errors to NaN
-rna_seq_df = rna_seq_df.apply(pd.to_numeric, errors='coerce')
-# Fill any NaN values with 0
-rna_seq_df = rna_seq_df.fillna(0)
-rna_seq_array = preprocess_rna_seq_for_bulkrnabert(rna_seq_df, config)
-tokens_ids = tokenizer.batch_tokenize(rna_seq_array)
-tokens = jnp.asarray(tokens_ids, dtype=jnp.int32)
+def main():
+    try:
+        # Get pretrained model
+        logging.info("Loading pretrained model...")
+        parameters, forward_fn, tokenizer, config = get_pretrained_model(
+            model_name="bulk_rna_bert_tcga",
+            embeddings_layers_to_save=(4,),
+            checkpoint_directory="multiomics-open-research/checkpoints/",
+        )
+        forward_fn = hk.transform(forward_fn)
 
-# Process in very small batches to avoid memory issues
-batch_size = 4  # Reduced batch size
-num_samples = len(tokens)
-all_embeddings = []
+        # Get bulk RNASeq data and tokenize it
+        logging.info("Loading and preprocessing data...")
+        rna_seq_df = pd.read_csv("data/celltype_specific_2d_matrix.csv", index_col=0)
+        rna_seq_df = rna_seq_df.apply(pd.to_numeric, errors='coerce')
+        rna_seq_df = rna_seq_df.fillna(0)
+        
+        # Process in very small batches to avoid memory issues
+        batch_size = 2  # Further reduced batch size
+        num_samples = len(rna_seq_df)
+        
+        # Process data in chunks
+        chunk_size = 1000  # Process 1000 samples at a time
+        all_embeddings = []
+        
+        for chunk_start in range(0, num_samples, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, num_samples)
+            logging.info(f"Processing chunk {chunk_start}-{chunk_end} of {num_samples} samples...")
+            
+            # Process current chunk
+            chunk_df = rna_seq_df.iloc[chunk_start:chunk_end]
+            rna_seq_array = preprocess_rna_seq_for_bulkrnabert(chunk_df, config)
+            tokens_ids = tokenizer.batch_tokenize(rna_seq_array)
+            tokens = jnp.asarray(tokens_ids, dtype=jnp.int32)
+            
+            # Get embedding dimension from first sample
+            if chunk_start == 0:
+                test_batch = tokens[:1]
+                test_outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), test_batch)
+                embedding_dim = test_outs["embeddings_4"].mean(axis=1).shape[1]
+                logging.info(f"Embedding dimension: {embedding_dim}")
+            
+            # Process current chunk in batches
+            chunk_embeddings = np.zeros((len(chunk_df), embedding_dim), dtype=np.float32)
+            
+            for i in range(0, len(tokens), batch_size):
+                batch_tokens = tokens[i:i + batch_size]
+                random_key = jax.random.PRNGKey(0)
+                
+                try:
+                    batch_embeddings = process_batch(batch_tokens, parameters, forward_fn, random_key)
+                    chunk_embeddings[i:i + batch_size] = batch_embeddings
+                    
+                    # Clear memory
+                    del batch_embeddings
+                    gc.collect()
+                    jax.clear_caches()
+                    
+                    if (i // batch_size) % 10 == 0:
+                        logging.info(f"Processed batch {i//batch_size + 1}/{(len(tokens) + batch_size - 1)//batch_size}")
+                        
+                except Exception as e:
+                    logging.error(f"Error in batch {i}: {str(e)}")
+                    raise
+            
+            all_embeddings.append(chunk_embeddings)
+            
+            # Clear memory after each chunk
+            del chunk_df
+            del rna_seq_array
+            del tokens_ids
+            del tokens
+            del chunk_embeddings
+            gc.collect()
+            jax.clear_caches()
+        
+        # Combine all embeddings
+        all_embeddings = np.vstack(all_embeddings)
+        
+        logging.info("Saving results...")
+        # Save embeddings
+        np.save('data/celltype_specific_embeddings.npy', all_embeddings)
+        
+        # Also save as CSV with donor IDs as index
+        mean_embedding_df = pd.DataFrame(
+            all_embeddings,
+            index=rna_seq_df.index
+        )
+        mean_embedding_df.to_csv('data/celltype_specific_embeddings.csv')
+        
+        logging.info("Done!")
+        
+    except Exception as e:
+        logging.error(f"Error in main execution: {str(e)}")
+        raise
 
-print(f"Processing {num_samples} samples in batches of {batch_size}...")
-
-# First, get the embedding dimension by processing a single sample
-test_batch = tokens[:1]
-test_outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), test_batch)
-embedding_dim = test_outs["embeddings_4"].mean(axis=1).shape[1]
-print(f"Embedding dimension: {embedding_dim}")
-
-# Pre-allocate memory for embeddings
-all_embeddings = np.zeros((num_samples, embedding_dim), dtype=np.float32)
-
-for i in range(0, num_samples, batch_size):
-    batch_tokens = tokens[i:i + batch_size]
-    
-    # Inference for this batch
-    random_key = jax.random.PRNGKey(0)
-    outs = forward_fn.apply(parameters, random_key, batch_tokens)
-    
-    # Get mean embeddings from layer 4 for this batch
-    batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1))
-    all_embeddings[i:i + batch_size] = batch_embeddings
-    
-    # Clear memory
-    del outs
-    del batch_embeddings
-    gc.collect()
-    jax.clear_caches()
-    
-    if (i // batch_size) % 10 == 0:  # Print progress every 10 batches
-        print(f"Processed batch {i//batch_size + 1}/{(num_samples + batch_size - 1)//batch_size}")
-
-print("Saving results...")
-# Save embeddings
-np.save('data/celltype_specific_embeddings.npy', all_embeddings)
-
-# Also save as CSV with donor IDs as index
-mean_embedding_df = pd.DataFrame(
-    all_embeddings,
-    index=rna_seq_df.index
-)
-mean_embedding_df.to_csv('data/celltype_specific_embeddings.csv')
-
-print("Done!")
+if __name__ == "__main__":
+    main()
