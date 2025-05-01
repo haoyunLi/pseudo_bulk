@@ -6,8 +6,8 @@ import numpy as np
 from multiomics_open_research.bulk_rna_bert.pretrained import get_pretrained_model
 from multiomics_open_research.bulk_rna_bert.preprocess import preprocess_rna_seq_for_bulkrnabert
 import gc
+import os
 
-# Configure JAX for memory efficiency
 jax.config.update('jax_platform_name', 'gpu')
 jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
 jax.config.update('jax_enable_x64', False)
@@ -19,7 +19,7 @@ parameters, forward_fn, tokenizer, config = get_pretrained_model(
     embeddings_layers_to_save=(4,),
     checkpoint_directory="multiomics-open-research/checkpoints/",
 )
-forward_fn = hk.transform_with_state(forward_fn)
+forward_fn = hk.transform(forward_fn)
 
 # Get bulk RNASeq data and tokenize it
 print("Loading and preprocessing data...")
@@ -41,7 +41,7 @@ print(f"Processing {num_samples} samples in batches of {batch_size}...")
 
 # First, get the embedding dimension by processing a single sample
 test_batch = tokens[:1]
-test_outs, _ = forward_fn.apply(parameters, None, jax.random.PRNGKey(0), test_batch)
+test_outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), test_batch)
 embedding_dim = test_outs["embeddings_4"].mean(axis=1).shape[1]
 print(f"Embedding dimension: {embedding_dim}")
 
@@ -53,7 +53,7 @@ for i in range(0, num_samples, batch_size):
     
     # Inference for this batch
     random_key = jax.random.PRNGKey(0)
-    outs, _ = forward_fn.apply(parameters, None, random_key, batch_tokens)
+    outs = forward_fn.apply(parameters, random_key, batch_tokens)
     
     # Get mean embeddings from layer 4 for this batch
     batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1))
