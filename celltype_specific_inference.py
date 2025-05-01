@@ -9,9 +9,6 @@ import gc
 import logging
 import os
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 # Configure JAX for memory efficiency
 jax.config.update('jax_platform_name', 'cpu')
 jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
@@ -55,7 +52,6 @@ def main():
         for chunk_start in range(0, num_samples, chunk_size):
             chunk_end = min(chunk_start + chunk_size, num_samples)
             logging.info(f"Processing chunk {chunk_start}-{chunk_end} of {num_samples} samples...")
-            
             # Process current chunk
             chunk_df = rna_seq_df.iloc[chunk_start:chunk_end]
             rna_seq_array = preprocess_rna_seq_for_bulkrnabert(chunk_df, config)
