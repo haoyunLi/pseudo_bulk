@@ -51,11 +51,11 @@ def main():
         rna_seq_df = rna_seq_df.fillna(0)
         
         # Further reduced batch size to prevent OOM
-        batch_size = 4  # Reduced from 32
+        batch_size = 2  # Reduced from 32
         num_samples = len(rna_seq_df)
         
         # Further reduced chunk size for better memory management
-        chunk_size = 1000  # Reduced from 2000
+        chunk_size = 500  # Reduced from 2000
         all_embeddings = []
         
         for chunk_start in range(0, num_samples, chunk_size):
