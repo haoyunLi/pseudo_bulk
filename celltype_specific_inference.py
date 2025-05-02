@@ -23,6 +23,10 @@ jax.config.update('jax_enable_x64', False)
 jax.config.update('jax_disable_jit', False)  # Enable JIT compilation
 jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
 
+# Add memory optimization settings
+jax.config.update('jax_gpu_memory_fraction', 0.8)  # Use 80% of GPU memory
+jax.config.update('jax_gpu_memory_allocator', 'cuda_malloc_async')  # Use async memory allocator
+
 def process_batch(batch_tokens, parameters, forward_fn, random_key):
     """Process a single batch of tokens."""
     try:
@@ -50,12 +54,12 @@ def main():
         rna_seq_df = rna_seq_df.apply(pd.to_numeric, errors='coerce')
         rna_seq_df = rna_seq_df.fillna(0)
         
-        # Reduced batch size to prevent OOM
-        batch_size = 32  # Reduced from 64
+        # Further reduced batch size to prevent OOM
+        batch_size = 16  # Reduced from 32
         num_samples = len(rna_seq_df)
         
-        # Reduced chunk size for better memory management
-        chunk_size = 2000  # Reduced from 5000
+        # Further reduced chunk size for better memory management
+        chunk_size = 1000  # Reduced from 2000
         all_embeddings = []
         
         for chunk_start in range(0, num_samples, chunk_size):

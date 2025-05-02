@@ -29,7 +29,7 @@ jax.config.update('jax_disable_jit', False)  # Enable JIT compilation
 jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
 
 # Add memory optimization settings
-jax.config.update('jax_gpu_memory_fraction', 0.9)  # Use 90% of GPU memory
+jax.config.update('jax_gpu_memory_fraction', 0.8)  # Use 80% of GPU memory
 jax.config.update('jax_gpu_memory_allocator', 'cuda_malloc_async')  # Use async memory allocator
 
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
@@ -125,7 +125,7 @@ def main():
         )
         
         # Training parameters optimized for A100
-        batch_size = 32  # Reduced from 128 to match inference settings
+        batch_size = 16  # Reduced from 32 to match inference settings
         num_epochs = 50  # Keep same number of epochs
         learning_rate = 1e-4
         checkpoint_frequency = 5  # Save checkpoint every 5 epochs
@@ -181,7 +181,7 @@ def main():
             avg_loss = epoch_loss / num_batches
             
             # Compute embeddings for evaluation in larger batches
-            eval_batch_size = 64  # Reduced from 256 to match inference settings
+            eval_batch_size = 16  # Reduced from 64 to match inference settings
             pseudobulk_embeddings = []
             celltype_embeddings = []
             
