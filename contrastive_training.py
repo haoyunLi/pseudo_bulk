@@ -28,10 +28,6 @@ jax.config.update('jax_enable_x64', False)
 jax.config.update('jax_disable_jit', False)  # Enable JIT compilation
 jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
 
-# Add memory optimization settings
-jax.config.update('jax_gpu_memory_fraction', 0.8)  # Use 80% of GPU memory
-jax.config.update('jax_gpu_memory_allocator', 'cuda_malloc_async')  # Use async memory allocator
-
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     """Load and preprocess both pseudobulk and celltype-specific data."""
     # Load pseudobulk data
