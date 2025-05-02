@@ -121,7 +121,7 @@ def main():
         )
         
         # Training parameters optimized for A100
-        batch_size = 4  # Reduced from 32 to match inference settings
+        batch_size = 6  # Reduced from 32 to match inference settings
         num_epochs = 50  # Keep same number of epochs
         learning_rate = 1e-4
         checkpoint_frequency = 5  # Save checkpoint every 5 epochs
@@ -177,7 +177,7 @@ def main():
             avg_loss = epoch_loss / num_batches
             
             # Compute embeddings for evaluation in larger batches
-            eval_batch_size = 4  # Reduced from 64 to match inference settings
+            eval_batch_size = 6  # Reduced from 64 to match inference settings
             pseudobulk_embeddings = []
             celltype_embeddings = []
             
