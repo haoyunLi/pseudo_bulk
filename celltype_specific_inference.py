@@ -51,7 +51,7 @@ def main():
         rna_seq_df = rna_seq_df.fillna(0)
         
         # Further reduced batch size to prevent OOM
-        batch_size = 6  # Reduced from 32
+        batch_size = 4  # Reduced from 32
         num_samples = len(rna_seq_df)
         
         # Further reduced chunk size for better memory management
