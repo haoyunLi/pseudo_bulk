@@ -14,6 +14,13 @@ from tqdm import tqdm
 import optax
 from sklearn.preprocessing import LabelEncoder
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
 # Configure JAX for memory efficiency
 jax.config.update('jax_platform_name', 'gpu')
 jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)

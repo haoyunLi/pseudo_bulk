@@ -8,6 +8,7 @@ from multiomics_open_research.bulk_rna_bert.preprocess import preprocess_rna_seq
 import gc
 import os
 
+
 jax.config.update('jax_platform_name', 'gpu')
 jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
 jax.config.update('jax_enable_x64', False)

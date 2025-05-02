@@ -9,10 +9,19 @@ import gc
 import logging
 import os
 
-# Configure JAX for memory efficiency
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Optimize JAX configuration for GPU
 jax.config.update('jax_platform_name', 'gpu')
 jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
 jax.config.update('jax_enable_x64', False)
+jax.config.update('jax_disable_jit', False)  # Enable JIT compilation
+jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
 
 def process_batch(batch_tokens, parameters, forward_fn, random_key):
     """Process a single batch of tokens."""
@@ -41,17 +50,18 @@ def main():
         rna_seq_df = rna_seq_df.apply(pd.to_numeric, errors='coerce')
         rna_seq_df = rna_seq_df.fillna(0)
         
-        # Process in very small batches to avoid memory issues
-        batch_size = 2  # Further reduced batch size
+        # Increased batch size for better GPU utilization
+        batch_size = 64  # Increased 
         num_samples = len(rna_seq_df)
         
-        # Process data in chunks
-        chunk_size = 1000  # Process 1000 samples at a time
+        # Increased chunk size for better efficiency
+        chunk_size = 5000  # Increased from 1000 to 5000
         all_embeddings = []
         
         for chunk_start in range(0, num_samples, chunk_size):
             chunk_end = min(chunk_start + chunk_size, num_samples)
             logging.info(f"Processing chunk {chunk_start}-{chunk_end} of {num_samples} samples...")
+            
             # Process current chunk
             chunk_df = rna_seq_df.iloc[chunk_start:chunk_end]
             rna_seq_array = preprocess_rna_seq_for_bulkrnabert(chunk_df, config)
@@ -76,12 +86,10 @@ def main():
                     batch_embeddings = process_batch(batch_tokens, parameters, forward_fn, random_key)
                     chunk_embeddings[i:i + batch_size] = batch_embeddings
                     
-                    # Clear memory
-                    del batch_embeddings
-                    gc.collect()
-                    jax.clear_caches()
-                    
-                    if (i // batch_size) % 10 == 0:
+                    # Reduced frequency of memory clearing
+                    if (i // batch_size) % 50 == 0:  # Only clear every 50 batches
+                        gc.collect()
+                        jax.clear_caches()
                         logging.info(f"Processed batch {i//batch_size + 1}/{(len(tokens) + batch_size - 1)//batch_size}")
                         
                 except Exception as e:
