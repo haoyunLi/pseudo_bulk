@@ -50,12 +50,12 @@ def main():
         rna_seq_df = rna_seq_df.apply(pd.to_numeric, errors='coerce')
         rna_seq_df = rna_seq_df.fillna(0)
         
-        # Increased batch size for better GPU utilization
-        batch_size = 64  # Increased 
+        # Reduced batch size to prevent OOM
+        batch_size = 32  # Reduced from 64
         num_samples = len(rna_seq_df)
         
-        # Increased chunk size for better efficiency
-        chunk_size = 5000  # Increased from 1000 to 5000
+        # Reduced chunk size for better memory management
+        chunk_size = 2000  # Reduced from 5000
         all_embeddings = []
         
         for chunk_start in range(0, num_samples, chunk_size):

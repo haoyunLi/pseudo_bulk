@@ -25,6 +25,12 @@ logging.basicConfig(
 jax.config.update('jax_platform_name', 'gpu')
 jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
 jax.config.update('jax_enable_x64', False)
+jax.config.update('jax_disable_jit', False)  # Enable JIT compilation
+jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
+
+# Add memory optimization settings
+jax.config.update('jax_gpu_memory_fraction', 0.9)  # Use 90% of GPU memory
+jax.config.update('jax_gpu_memory_allocator', 'cuda_malloc_async')  # Use async memory allocator
 
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     """Load and preprocess both pseudobulk and celltype-specific data."""
@@ -118,13 +124,17 @@ def main():
             tokenizer
         )
         
-        # Training parameters
-        batch_size = 2
-        num_epochs = 10
+        # Training parameters optimized for A100
+        batch_size = 32  # Reduced from 128 to match inference settings
+        num_epochs = 50  # Keep same number of epochs
         learning_rate = 1e-4
+        checkpoint_frequency = 5  # Save checkpoint every 5 epochs
         
-        # Initialize optimizer
-        optimizer = optax.adam(learning_rate)
+        # Initialize optimizer with gradient clipping
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(1.0),  # Add gradient clipping
+            optax.adam(learning_rate)
+        )
         opt_state = optimizer.init(parameters)
         
         # Initialize training history
@@ -145,10 +155,10 @@ def main():
             pseudobulk_batches = create_batches(pseudobulk_tokens, batch_size)
             celltype_batches = create_batches(celltype_tokens, batch_size)
             
-            # Process batches
-            for pseudobulk_batch, celltype_batch in tqdm(zip(pseudobulk_batches, celltype_batches), 
-                                                       desc=f"Epoch {epoch + 1}/{num_epochs}"):
-                rng_key = jax.random.PRNGKey(epoch)
+            # Process batches with progress tracking
+            for batch_idx, (pseudobulk_batch, celltype_batch) in enumerate(tqdm(zip(pseudobulk_batches, celltype_batches), 
+                                                       desc=f"Epoch {epoch + 1}/{num_epochs}")):
+                rng_key = jax.random.PRNGKey(epoch * 1000 + batch_idx)  # Better RNG key generation
                 parameters, opt_state, batch_loss = train_step(
                     parameters,
                     opt_state,
@@ -162,26 +172,32 @@ def main():
                 epoch_loss += batch_loss
                 num_batches += 1
                 
-                # Clear memory
-                gc.collect()
-                jax.clear_caches()
+                # Optimized memory clearing
+                if batch_idx % 10 == 0:  # Clear memory every 10 batches
+                    gc.collect()
+                    jax.clear_caches()
             
             # Compute average loss
             avg_loss = epoch_loss / num_batches
             
-            # Compute embeddings for evaluation
+            # Compute embeddings for evaluation in larger batches
+            eval_batch_size = 64  # Reduced from 256 to match inference settings
             pseudobulk_embeddings = []
             celltype_embeddings = []
             
-            for batch in create_batches(pseudobulk_tokens, batch_size):
+            for batch in create_batches(pseudobulk_tokens, eval_batch_size):
                 outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), batch)
                 batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1))
                 pseudobulk_embeddings.append(batch_embeddings)
+                del outs  # Clear memory immediately
+                gc.collect()
             
-            for batch in create_batches(celltype_tokens, batch_size):
+            for batch in create_batches(celltype_tokens, eval_batch_size):
                 outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), batch)
                 batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1))
                 celltype_embeddings.append(batch_embeddings)
+                del outs  # Clear memory immediately
+                gc.collect()
             
             pseudobulk_embeddings = np.vstack(pseudobulk_embeddings)
             celltype_embeddings = np.vstack(celltype_embeddings)
@@ -204,12 +220,18 @@ def main():
             # Track training progress
             track_training_progress(history)
             
-            # Save model checkpoint
-            if (epoch + 1) % 5 == 0:
+            # Save model checkpoint more frequently
+            if (epoch + 1) % checkpoint_frequency == 0:
                 checkpoint_path = f"checkpoints/model_epoch_{epoch + 1}.pkl"
                 with open(checkpoint_path, 'wb') as f:
                     import pickle
-                    pickle.dump(parameters, f)
+                    pickle.dump({
+                        'parameters': parameters,
+                        'opt_state': opt_state,
+                        'epoch': epoch + 1,
+                        'loss': avg_loss,
+                        'metrics': metrics
+                    }, f)
                 logging.info(f"Saved checkpoint to {checkpoint_path}")
         
         # Final evaluation
