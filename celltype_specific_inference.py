@@ -44,7 +44,7 @@ def create_chunk_attention_mask(seq_len, chunk_size):
     
     return mask
 
-def apply_chunk_attention(attention_fn, x, chunk_size, mask=None):
+def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
     """Apply attention function with chunk-based masking.
     
     Args:
@@ -52,6 +52,7 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None):
         x: Input tensor
         chunk_size: Size of each chunk
         mask: Optional additional mask
+        rng_key: Random key for initialization
         
     Returns:
         Output tensor with chunk-based attention
@@ -63,20 +64,32 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None):
     if mask is not None:
         chunk_mask = jnp.logical_and(chunk_mask, mask)
     
-    # Apply attention with chunk mask
-    return attention_fn(x, mask=chunk_mask)
+    # Use provided rng_key or create a new one
+    if rng_key is None:
+        rng_key = jax.random.PRNGKey(0)
+    
+    # Apply attention with chunk mask using the transformed function's apply method
+    return attention_fn.apply(attention_fn.init(rng_key, x), rng_key, x, mask=chunk_mask)
 
 def process_batch(batch_tokens, parameters, forward_fn, random_key, chunk_size):
     """Process a single batch of tokens with chunk-based attention."""
     try:
         # Modify the forward function to use chunk-based attention
         def chunk_attention_forward_fn(x, mask=None):
-            return apply_chunk_attention(forward_fn, x, chunk_size, mask)
+            return apply_chunk_attention(forward_fn, x, chunk_size, mask, random_key)
         
         # Transform the function with Haiku
         chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
         
-        outs = chunk_attention_forward_fn.apply(parameters, random_key, batch_tokens)
+        # Initialize parameters for the chunk attention function
+        chunk_params = chunk_attention_forward_fn.init(random_key, batch_tokens)
+        
+        # Apply the function with both sets of parameters
+        outs = chunk_attention_forward_fn.apply(
+            {**parameters, **chunk_params},  # Combine both parameter sets
+            random_key,
+            batch_tokens
+        )
         batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
         return batch_embeddings
     except Exception as e:
@@ -112,50 +125,57 @@ def main():
             chunk_end = min(chunk_start + processing_chunk_size, num_samples)
             logging.info(f"Processing chunk {chunk_start}-{chunk_end} of {num_samples} samples...")
             
-            # Process current chunk
-            chunk_df = rna_seq_df.iloc[chunk_start:chunk_end]
-            rna_seq_array = preprocess_rna_seq_for_bulkrnabert(chunk_df, config)
-            tokens_ids = tokenizer.batch_tokenize(rna_seq_array)
-            tokens = jnp.asarray(tokens_ids, dtype=jnp.int32)
-            
-            # Get embedding dimension from first sample
-            if chunk_start == 0:
-                test_batch = tokens[:1]
-                test_outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), test_batch)
-                embedding_dim = test_outs["embeddings_4"].mean(axis=1).shape[1]
-                logging.info(f"Embedding dimension: {embedding_dim}")
-            
-            # Process current chunk in batches
-            chunk_embeddings = np.zeros((len(chunk_df), embedding_dim), dtype=np.float32)
-            
-            for i in range(0, len(tokens), batch_size):
-                batch_tokens = tokens[i:i + batch_size]
-                random_key = jax.random.PRNGKey(0)
+            try:
+                # Process current chunk
+                chunk_df = rna_seq_df.iloc[chunk_start:chunk_end]
+                rna_seq_array = preprocess_rna_seq_for_bulkrnabert(chunk_df, config)
+                tokens_ids = tokenizer.batch_tokenize(rna_seq_array)
+                tokens = jnp.asarray(tokens_ids, dtype=jnp.int32)
                 
-                try:
-                    batch_embeddings = process_batch(batch_tokens, parameters, forward_fn, random_key, attention_chunk_size)
-                    chunk_embeddings[i:i + batch_size] = batch_embeddings
+                # Get embedding dimension from first sample
+                if chunk_start == 0:
+                    test_batch = tokens[:1]
+                    test_outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), test_batch)
+                    embedding_dim = test_outs["embeddings_4"].mean(axis=1).shape[1]
+                    logging.info(f"Embedding dimension: {embedding_dim}")
+                
+                # Process current chunk in batches
+                chunk_embeddings = np.zeros((len(chunk_df), embedding_dim), dtype=np.float32)
+                
+                for i in range(0, len(tokens), batch_size):
+                    batch_tokens = tokens[i:i + batch_size]
+                    random_key = jax.random.PRNGKey(0)
                     
-                    # Reduced frequency of memory clearing
-                    if (i // batch_size) % 50 == 0:  # Only clear every 50 batches
+                    try:
+                        batch_embeddings = process_batch(batch_tokens, parameters, forward_fn, random_key, attention_chunk_size)
+                        chunk_embeddings[i:i + batch_size] = batch_embeddings
+                        
+                        # Clear memory after each batch
+                        del batch_embeddings
                         gc.collect()
                         jax.clear_caches()
-                        logging.info(f"Processed batch {i//batch_size + 1}/{(len(tokens) + batch_size - 1)//batch_size}")
                         
-                except Exception as e:
-                    logging.error(f"Error in batch {i}: {str(e)}")
-                    raise
-            
-            all_embeddings.append(chunk_embeddings)
-            
-            # Clear memory after each chunk
-            del chunk_df
-            del rna_seq_array
-            del tokens_ids
-            del tokens
-            del chunk_embeddings
-            gc.collect()
-            jax.clear_caches()
+                        if (i // batch_size) % 10 == 0:  # Log progress every 10 batches
+                            logging.info(f"Processed batch {i//batch_size + 1}/{(len(tokens) + batch_size - 1)//batch_size}")
+                            
+                    except Exception as e:
+                        logging.error(f"Error in batch {i}: {str(e)}")
+                        raise
+                
+                all_embeddings.append(chunk_embeddings)
+                
+            except Exception as e:
+                logging.error(f"Error processing chunk {chunk_start}-{chunk_end}: {str(e)}")
+                raise
+            finally:
+                # Clear memory after each chunk
+                del chunk_df
+                del rna_seq_array
+                del tokens_ids
+                del tokens
+                del chunk_embeddings
+                gc.collect()
+                jax.clear_caches()
         
         # Combine all embeddings
         all_embeddings = np.vstack(all_embeddings)

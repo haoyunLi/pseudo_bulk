@@ -49,7 +49,7 @@ def create_chunk_attention_mask(seq_len, chunk_size):
     
     return mask
 
-def apply_chunk_attention(attention_fn, x, chunk_size, mask=None):
+def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
     """Apply attention function with chunk-based masking.
     
     Args:
@@ -57,6 +57,7 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None):
         x: Input tensor
         chunk_size: Size of each chunk
         mask: Optional additional mask
+        rng_key: Random key for initialization
         
     Returns:
         Output tensor with chunk-based attention
@@ -68,8 +69,12 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None):
     if mask is not None:
         chunk_mask = jnp.logical_and(chunk_mask, mask)
     
-    # Apply attention with chunk mask
-    return attention_fn(x, mask=chunk_mask)
+    # Use provided rng_key or create a new one
+    if rng_key is None:
+        rng_key = jax.random.PRNGKey(0)
+    
+    # Apply attention with chunk mask using the transformed function's apply method
+    return attention_fn.apply(attention_fn.init(rng_key, x), rng_key, x, mask=chunk_mask)
 
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     """Load and preprocess both pseudobulk and celltype-specific data."""
@@ -119,12 +124,20 @@ def process_chunk(chunk_tokens, parameters, forward_fn, rng_key, chunk_size):
     try:
         # Modify the forward function to use chunk-based attention
         def chunk_attention_forward_fn(x, mask=None):
-            return apply_chunk_attention(forward_fn, x, chunk_size, mask)
+            return apply_chunk_attention(forward_fn, x, chunk_size, mask, rng_key)
         
         # Transform the function with Haiku
         chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
         
-        outs = chunk_attention_forward_fn.apply(parameters, rng_key, chunk_tokens)
+        # Initialize parameters for the chunk attention function
+        chunk_params = chunk_attention_forward_fn.init(rng_key, chunk_tokens)
+        
+        # Apply the function with both sets of parameters
+        outs = chunk_attention_forward_fn.apply(
+            {**parameters, **chunk_params},  # Combine both parameter sets
+            rng_key,
+            chunk_tokens
+        )
         chunk_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
         return chunk_embeddings
     except Exception as e:
@@ -136,16 +149,22 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
     def loss_fn(params):
         # Modify the forward function to use chunk-based attention
         def chunk_attention_forward_fn(x, mask=None):
-            return apply_chunk_attention(forward_fn, x, chunk_size, mask)
+            return apply_chunk_attention(forward_fn, x, chunk_size, mask, rng_key)
         
         # Transform the function with Haiku
         chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
+        
+        # Initialize parameters for the chunk attention function
+        chunk_params = chunk_attention_forward_fn.init(rng_key, pseudobulk_batch)
+        
+        # Combine parameters
+        combined_params = {**params, **chunk_params}
         
         return compute_contrastive_loss(
             pseudobulk_batch,
             celltype_batch,
             chunk_attention_forward_fn,
-            params,
+            combined_params,
             rng_key
         )
     
