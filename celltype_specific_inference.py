@@ -23,10 +23,57 @@ jax.config.update('jax_enable_x64', False)
 jax.config.update('jax_disable_jit', False)  # Enable JIT compilation
 jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
 
-def process_batch(batch_tokens, parameters, forward_fn, random_key):
-    """Process a single batch of tokens."""
+def create_chunk_attention_mask(seq_len, chunk_size):
+    """Create a mask for chunk-based attention.
+    
+    Args:
+        seq_len: Total sequence length
+        chunk_size: Size of each chunk
+        
+    Returns:
+        Boolean mask of shape [seq_len, seq_len] where True indicates
+        positions within the same chunk.
+    """
+    mask = jnp.zeros((seq_len, seq_len), dtype=bool)
+    
+    # For each chunk
+    for chunk_start in range(0, seq_len, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, seq_len)
+        # Set True for all positions within this chunk
+        mask = mask.at[chunk_start:chunk_end, chunk_start:chunk_end].set(True)
+    
+    return mask
+
+def apply_chunk_attention(attention_fn, x, chunk_size, mask=None):
+    """Apply attention function with chunk-based masking.
+    
+    Args:
+        attention_fn: Original attention function
+        x: Input tensor
+        chunk_size: Size of each chunk
+        mask: Optional additional mask
+        
+    Returns:
+        Output tensor with chunk-based attention
+    """
+    seq_len = x.shape[1]
+    chunk_mask = create_chunk_attention_mask(seq_len, chunk_size)
+    
+    # Combine with additional mask if provided
+    if mask is not None:
+        chunk_mask = jnp.logical_and(chunk_mask, mask)
+    
+    # Apply attention with chunk mask
+    return attention_fn(x, mask=chunk_mask)
+
+def process_batch(batch_tokens, parameters, forward_fn, random_key, chunk_size):
+    """Process a single batch of tokens with chunk-based attention."""
     try:
-        outs = forward_fn.apply(parameters, random_key, batch_tokens)
+        # Modify the forward function to use chunk-based attention
+        def chunk_attention_forward_fn(x, mask=None):
+            return apply_chunk_attention(forward_fn, x, chunk_size, mask)
+        
+        outs = chunk_attention_forward_fn.apply(parameters, random_key, batch_tokens)
         batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
         return batch_embeddings
     except Exception as e:
@@ -50,16 +97,16 @@ def main():
         rna_seq_df = rna_seq_df.apply(pd.to_numeric, errors='coerce')
         rna_seq_df = rna_seq_df.fillna(0)
         
-        # Further reduced batch size to prevent OOM
-        batch_size = 1  # Reduced from 32
+        # Configuration
+        batch_size = 1  # Process one sample at a time
+        attention_chunk_size = 128  # Size of attention chunks
+        processing_chunk_size = 500  # Size of data processing chunks
         num_samples = len(rna_seq_df)
         
-        # Further reduced chunk size for better memory management
-        chunk_size = 500  # Reduced from 2000
         all_embeddings = []
         
-        for chunk_start in range(0, num_samples, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, num_samples)
+        for chunk_start in range(0, num_samples, processing_chunk_size):
+            chunk_end = min(chunk_start + processing_chunk_size, num_samples)
             logging.info(f"Processing chunk {chunk_start}-{chunk_end} of {num_samples} samples...")
             
             # Process current chunk
@@ -83,7 +130,7 @@ def main():
                 random_key = jax.random.PRNGKey(0)
                 
                 try:
-                    batch_embeddings = process_batch(batch_tokens, parameters, forward_fn, random_key)
+                    batch_embeddings = process_batch(batch_tokens, parameters, forward_fn, random_key, attention_chunk_size)
                     chunk_embeddings[i:i + batch_size] = batch_embeddings
                     
                     # Reduced frequency of memory clearing

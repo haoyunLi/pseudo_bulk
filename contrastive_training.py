@@ -28,6 +28,49 @@ jax.config.update('jax_enable_x64', False)
 jax.config.update('jax_disable_jit', False)  # Enable JIT compilation
 jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
 
+def create_chunk_attention_mask(seq_len, chunk_size):
+    """Create a mask for chunk-based attention.
+    
+    Args:
+        seq_len: Total sequence length
+        chunk_size: Size of each chunk
+        
+    Returns:
+        Boolean mask of shape [seq_len, seq_len] where True indicates
+        positions within the same chunk.
+    """
+    mask = jnp.zeros((seq_len, seq_len), dtype=bool)
+    
+    # For each chunk
+    for chunk_start in range(0, seq_len, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, seq_len)
+        # Set True for all positions within this chunk
+        mask = mask.at[chunk_start:chunk_end, chunk_start:chunk_end].set(True)
+    
+    return mask
+
+def apply_chunk_attention(attention_fn, x, chunk_size, mask=None):
+    """Apply attention function with chunk-based masking.
+    
+    Args:
+        attention_fn: Original attention function
+        x: Input tensor
+        chunk_size: Size of each chunk
+        mask: Optional additional mask
+        
+    Returns:
+        Output tensor with chunk-based attention
+    """
+    seq_len = x.shape[1]
+    chunk_mask = create_chunk_attention_mask(seq_len, chunk_size)
+    
+    # Combine with additional mask if provided
+    if mask is not None:
+        chunk_mask = jnp.logical_and(chunk_mask, mask)
+    
+    # Apply attention with chunk mask
+    return attention_fn(x, mask=chunk_mask)
+
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     """Load and preprocess both pseudobulk and celltype-specific data."""
     # Load pseudobulk data
@@ -71,19 +114,31 @@ def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     
     return pseudobulk_tokens, celltype_tokens, pseudobulk_df.index, celltype_df.index, labels, label_encoder
 
-def create_batches(tokens, batch_size):
-    """Create batches from tokens."""
-    num_samples = len(tokens)
-    for i in range(0, num_samples, batch_size):
-        yield tokens[i:i + batch_size]
+def process_chunk(chunk_tokens, parameters, forward_fn, rng_key, chunk_size):
+    """Process a chunk of tokens with chunk-based attention."""
+    try:
+        # Modify the forward function to use chunk-based attention
+        def chunk_attention_forward_fn(x, mask=None):
+            return apply_chunk_attention(forward_fn, x, chunk_size, mask)
+        
+        outs = chunk_attention_forward_fn.apply(parameters, rng_key, chunk_tokens)
+        chunk_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
+        return chunk_embeddings
+    except Exception as e:
+        logging.error(f"Error processing chunk: {str(e)}")
+        raise
 
-def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key):
-    """Perform a single training step."""
+def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key, chunk_size):
+    """Perform a single training step with chunk-based attention."""
     def loss_fn(params):
+        # Modify the forward function to use chunk-based attention
+        def chunk_attention_forward_fn(x, mask=None):
+            return apply_chunk_attention(forward_fn, x, chunk_size, mask)
+        
         return compute_contrastive_loss(
             pseudobulk_batch,
             celltype_batch,
-            forward_fn,
+            chunk_attention_forward_fn,
             params,
             rng_key
         )
@@ -120,15 +175,17 @@ def main():
             tokenizer
         )
         
-        # Training parameters optimized for A100
-        batch_size = 1  # Reduced from 32 to match inference settings
-        num_epochs = 50  # Keep same number of epochs
+        # Training configuration
+        batch_size = 1  # Process one sample at a time
+        chunk_size = 128  # Size of attention chunks (smaller than processing chunks)
+        processing_chunk_size = 500  # Size of data processing chunks
+        num_epochs = 50
         learning_rate = 1e-4
-        checkpoint_frequency = 5  # Save checkpoint every 5 epochs
+        checkpoint_frequency = 5
         
         # Initialize optimizer with gradient clipping
         optimizer = optax.chain(
-            optax.clip_by_global_norm(1.0),  # Add gradient clipping
+            optax.clip_by_global_norm(1.0),
             optax.adam(learning_rate)
         )
         opt_state = optimizer.init(parameters)
@@ -147,54 +204,76 @@ def main():
             epoch_loss = 0
             num_batches = 0
             
-            # Create batches
-            pseudobulk_batches = create_batches(pseudobulk_tokens, batch_size)
-            celltype_batches = create_batches(celltype_tokens, batch_size)
-            
-            # Process batches with progress tracking
-            for batch_idx, (pseudobulk_batch, celltype_batch) in enumerate(tqdm(zip(pseudobulk_batches, celltype_batches), 
-                                                       desc=f"Epoch {epoch + 1}/{num_epochs}")):
-                rng_key = jax.random.PRNGKey(epoch * 1000 + batch_idx)  # Better RNG key generation
-                parameters, opt_state, batch_loss = train_step(
-                    parameters,
-                    opt_state,
-                    pseudobulk_batch,
-                    celltype_batch,
-                    forward_fn,
-                    optimizer,
-                    rng_key
-                )
+            # Process data in chunks
+            for chunk_start in range(0, len(pseudobulk_tokens), processing_chunk_size):
+                chunk_end = min(chunk_start + processing_chunk_size, len(pseudobulk_tokens))
+                logging.info(f"Processing chunk {chunk_start}-{chunk_end} of {len(pseudobulk_tokens)} samples...")
                 
-                epoch_loss += batch_loss
-                num_batches += 1
+                # Get current chunk
+                pseudobulk_chunk = pseudobulk_tokens[chunk_start:chunk_end]
+                celltype_chunk = celltype_tokens[chunk_start:chunk_end]
                 
-                # Optimized memory clearing
-                if batch_idx % 10 == 0:  # Clear memory every 10 batches
-                    gc.collect()
-                    jax.clear_caches()
+                # Process chunk in batches
+                for i in range(0, len(pseudobulk_chunk), batch_size):
+                    batch_end = min(i + batch_size, len(pseudobulk_chunk))
+                    pseudobulk_batch = pseudobulk_chunk[i:batch_end]
+                    celltype_batch = celltype_chunk[i:batch_end]
+                    
+                    rng_key = jax.random.PRNGKey(epoch * 1000 + chunk_start + i)
+                    parameters, opt_state, batch_loss = train_step(
+                        parameters,
+                        opt_state,
+                        pseudobulk_batch,
+                        celltype_batch,
+                        forward_fn,
+                        optimizer,
+                        rng_key,
+                        chunk_size
+                    )
+                    
+                    epoch_loss += batch_loss
+                    num_batches += 1
+                    
+                    # Clear memory after each batch
+                    if i % 10 == 0:
+                        gc.collect()
+                        jax.clear_caches()
+                
+                # Clear memory after each chunk
+                del pseudobulk_chunk
+                del celltype_chunk
+                gc.collect()
+                jax.clear_caches()
             
             # Compute average loss
             avg_loss = epoch_loss / num_batches
             
-            # Compute embeddings for evaluation in larger batches
-            eval_batch_size = 1  # Reduced from 64 to match inference settings
+            # Compute embeddings for evaluation in chunks
+            logging.info("Computing embeddings for evaluation...")
             pseudobulk_embeddings = []
             celltype_embeddings = []
             
-            for batch in create_batches(pseudobulk_tokens, eval_batch_size):
-                outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), batch)
-                batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1))
-                pseudobulk_embeddings.append(batch_embeddings)
-                del outs  # Clear memory immediately
+            # Process pseudobulk data in chunks
+            for chunk_start in range(0, len(pseudobulk_tokens), processing_chunk_size):
+                chunk_end = min(chunk_start + processing_chunk_size, len(pseudobulk_tokens))
+                chunk = pseudobulk_tokens[chunk_start:chunk_end]
+                chunk_embeddings = process_chunk(chunk, parameters, forward_fn, jax.random.PRNGKey(0), chunk_size)
+                pseudobulk_embeddings.append(chunk_embeddings)
+                del chunk
+                del chunk_embeddings
                 gc.collect()
             
-            for batch in create_batches(celltype_tokens, eval_batch_size):
-                outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), batch)
-                batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1))
-                celltype_embeddings.append(batch_embeddings)
-                del outs  # Clear memory immediately
+            # Process celltype data in chunks
+            for chunk_start in range(0, len(celltype_tokens), processing_chunk_size):
+                chunk_end = min(chunk_start + processing_chunk_size, len(celltype_tokens))
+                chunk = celltype_tokens[chunk_start:chunk_end]
+                chunk_embeddings = process_chunk(chunk, parameters, forward_fn, jax.random.PRNGKey(0), chunk_size)
+                celltype_embeddings.append(chunk_embeddings)
+                del chunk
+                del chunk_embeddings
                 gc.collect()
             
+            # Combine embeddings
             pseudobulk_embeddings = np.vstack(pseudobulk_embeddings)
             celltype_embeddings = np.vstack(celltype_embeddings)
             
@@ -216,7 +295,7 @@ def main():
             # Track training progress
             track_training_progress(history)
             
-            # Save model checkpoint more frequently
+            # Save model checkpoint
             if (epoch + 1) % checkpoint_frequency == 0:
                 checkpoint_path = f"checkpoints/model_epoch_{epoch + 1}.pkl"
                 with open(checkpoint_path, 'wb') as f:
