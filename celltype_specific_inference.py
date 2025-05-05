@@ -118,8 +118,8 @@ def main():
         
         # Configuration
         batch_size = 16  # Process one sample at a time
-        attention_chunk_size = 512  # Size of attention chunks
-        processing_chunk_size = 1000  # Size of data processing chunks
+        attention_chunk_size = 256  # Size of attention chunks
+        processing_chunk_size = 500  # Size of data processing chunks
         num_samples = len(rna_seq_df)
         
         all_embeddings = []
