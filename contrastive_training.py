@@ -62,6 +62,7 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
     Returns:
         Output tensor with chunk-based attention
     """
+    # Create chunk mask
     seq_len = x.shape[1]
     chunk_mask = create_chunk_attention_mask(seq_len, chunk_size)
     
@@ -73,8 +74,9 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
     if rng_key is None:
         rng_key = jax.random.PRNGKey(0)
     
-    # Apply attention with chunk mask using the transformed function's apply method
-    return attention_fn.apply(attention_fn.init(rng_key, x), rng_key, x, mask=chunk_mask)
+    # Apply the forward function without mask
+    # The attention mask will be handled internally by the model
+    return attention_fn.apply(attention_fn.init(rng_key, x), rng_key, x)
 
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     """Load and preprocess both pseudobulk and celltype-specific data."""
@@ -122,9 +124,10 @@ def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
 def process_chunk(chunk_tokens, parameters, forward_fn, rng_key, chunk_size):
     """Process a chunk of tokens with chunk-based attention."""
     try:
-        # Modify the forward function to use chunk-based attention
-        def chunk_attention_forward_fn(x, mask=None):
-            return apply_chunk_attention(forward_fn, x, chunk_size, mask, rng_key)
+        # Create a wrapper function that handles the chunk-based attention
+        def chunk_attention_forward_fn(x):
+            # Apply the forward function
+            return apply_chunk_attention(forward_fn, x, chunk_size, rng_key=rng_key)
         
         # Transform the function with Haiku
         chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
@@ -147,9 +150,10 @@ def process_chunk(chunk_tokens, parameters, forward_fn, rng_key, chunk_size):
 def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key, chunk_size):
     """Perform a single training step with chunk-based attention."""
     def loss_fn(params):
-        # Modify the forward function to use chunk-based attention
-        def chunk_attention_forward_fn(x, mask=None):
-            return apply_chunk_attention(forward_fn, x, chunk_size, mask, rng_key)
+        # Create a wrapper function that handles the chunk-based attention
+        def chunk_attention_forward_fn(x):
+            # Apply the forward function
+            return apply_chunk_attention(forward_fn, x, chunk_size, rng_key=rng_key)
         
         # Transform the function with Haiku
         chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)

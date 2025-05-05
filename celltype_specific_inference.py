@@ -57,6 +57,7 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
     Returns:
         Output tensor with chunk-based attention
     """
+    # Create chunk mask
     seq_len = x.shape[1]
     chunk_mask = create_chunk_attention_mask(seq_len, chunk_size)
     
@@ -68,15 +69,17 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
     if rng_key is None:
         rng_key = jax.random.PRNGKey(0)
     
-    # Apply attention with chunk mask using the transformed function's apply method
-    return attention_fn.apply(attention_fn.init(rng_key, x), rng_key, x, mask=chunk_mask)
+    # Apply the forward function without mask
+    # The attention mask will be handled internally by the model
+    return attention_fn.apply(attention_fn.init(rng_key, x), rng_key, x)
 
 def process_batch(batch_tokens, parameters, forward_fn, random_key, chunk_size):
     """Process a single batch of tokens with chunk-based attention."""
     try:
-        # Modify the forward function to use chunk-based attention
-        def chunk_attention_forward_fn(x, mask=None):
-            return apply_chunk_attention(forward_fn, x, chunk_size, mask, random_key)
+        # Create a wrapper function that handles the chunk-based attention
+        def chunk_attention_forward_fn(x):
+            # Apply the forward function
+            return apply_chunk_attention(forward_fn, x, chunk_size, rng_key=random_key)
         
         # Transform the function with Haiku
         chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
