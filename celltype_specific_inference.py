@@ -117,7 +117,7 @@ def main():
         rna_seq_df = rna_seq_df.fillna(0)
         
         # Configuration
-        batch_size = 32  # Process one sample at a time
+        batch_size = 16  # Process one sample at a time
         attention_chunk_size = 512  # Size of attention chunks
         processing_chunk_size = 1000  # Size of data processing chunks
         num_samples = len(rna_seq_df)

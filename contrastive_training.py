@@ -205,9 +205,9 @@ def main():
         )
         
         # Training configuration
-        batch_size = 32  # Process one sample at a time
-        chunk_size = 512  # Size of attention chunks (smaller than processing chunks)
-        processing_chunk_size = 1000  # Size of data processing chunks
+        batch_size = 16  # Process one sample at a time
+        chunk_size = 256  # Size of attention chunks (smaller than processing chunks)
+        processing_chunk_size = 500  # Size of data processing chunks
         num_epochs = 50
         learning_rate = 1e-4
         checkpoint_frequency = 5
