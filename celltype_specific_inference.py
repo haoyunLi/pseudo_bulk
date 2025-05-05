@@ -73,6 +73,9 @@ def process_batch(batch_tokens, parameters, forward_fn, random_key, chunk_size):
         def chunk_attention_forward_fn(x, mask=None):
             return apply_chunk_attention(forward_fn, x, chunk_size, mask)
         
+        # Transform the function with Haiku
+        chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
+        
         outs = chunk_attention_forward_fn.apply(parameters, random_key, batch_tokens)
         batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
         return batch_embeddings

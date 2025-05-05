@@ -121,6 +121,9 @@ def process_chunk(chunk_tokens, parameters, forward_fn, rng_key, chunk_size):
         def chunk_attention_forward_fn(x, mask=None):
             return apply_chunk_attention(forward_fn, x, chunk_size, mask)
         
+        # Transform the function with Haiku
+        chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
+        
         outs = chunk_attention_forward_fn.apply(parameters, rng_key, chunk_tokens)
         chunk_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
         return chunk_embeddings
@@ -134,6 +137,9 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
         # Modify the forward function to use chunk-based attention
         def chunk_attention_forward_fn(x, mask=None):
             return apply_chunk_attention(forward_fn, x, chunk_size, mask)
+        
+        # Transform the function with Haiku
+        chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
         
         return compute_contrastive_loss(
             pseudobulk_batch,
