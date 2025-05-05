@@ -13,6 +13,7 @@ import os
 from tqdm import tqdm
 import optax
 from sklearn.preprocessing import LabelEncoder
+import time  # Add time import
 
 # Configure logging
 logging.basicConfig(
@@ -205,12 +206,18 @@ def main():
         )
         
         # Training configuration
-        batch_size = 16  # Process one sample at a time
-        chunk_size = 256  # Size of attention chunks (smaller than processing chunks)
-        processing_chunk_size = 500  # Size of data processing chunks
+        batch_size = 16  # Reduced for memory efficiency
+        chunk_size = 128  # Reduced for memory efficiency
+        processing_chunk_size = 250  # Reduced for memory efficiency
         num_epochs = 50
         learning_rate = 1e-4
         checkpoint_frequency = 5
+        
+        # Early stopping configuration
+        early_stopping_patience = 5
+        early_stopping_min_delta = 1e-4
+        best_loss = float('inf')
+        patience_counter = 0
         
         # Initialize optimizer with gradient clipping
         optimizer = optax.chain(
@@ -224,8 +231,13 @@ def main():
             'epoch': [],
             'loss': [],
             'mean_cosine_similarity': [],
-            'silhouette_score': []
+            'silhouette_score': [],
+            'best_loss': [],
+            'patience_counter': []
         }
+        
+        # Start time tracking
+        start_time = time.time()
         
         # Training loop
         logging.info("Starting training...")
@@ -264,7 +276,7 @@ def main():
                     num_batches += 1
                     
                     # Clear memory after each batch
-                    if i % 10 == 0:
+                    if i % 5 == 0:  # More frequent cleanup
                         gc.collect()
                         jax.clear_caches()
                 
@@ -276,6 +288,26 @@ def main():
             
             # Compute average loss
             avg_loss = epoch_loss / num_batches
+            
+            # Early stopping check
+            if avg_loss < (best_loss - early_stopping_min_delta):
+                best_loss = avg_loss
+                patience_counter = 0
+                # Save best model
+                checkpoint_path = f"checkpoints/best_model.pkl"
+                with open(checkpoint_path, 'wb') as f:
+                    import pickle
+                    pickle.dump({
+                        'parameters': parameters,
+                        'opt_state': opt_state,
+                        'epoch': epoch + 1,
+                        'loss': avg_loss,
+                        'metrics': metrics
+                    }, f)
+                logging.info(f"New best model saved with loss: {avg_loss:.4f}")
+            else:
+                patience_counter += 1
+                logging.info(f"No improvement for {patience_counter} epochs")
             
             # Compute embeddings for evaluation in chunks
             logging.info("Computing embeddings for evaluation...")
@@ -314,15 +346,33 @@ def main():
             history['loss'].append(avg_loss)
             history['mean_cosine_similarity'].append(metrics['mean_cosine_similarity'])
             history['silhouette_score'].append(metrics['silhouette_score'])
+            history['best_loss'].append(best_loss)
+            history['patience_counter'].append(patience_counter)
             
             # Log epoch statistics
+            elapsed_time = time.time() - start_time
+            avg_time_per_epoch = elapsed_time / (epoch + 1)
+            remaining_epochs = min(
+                num_epochs - epoch - 1,
+                early_stopping_patience - patience_counter
+            )
+            remaining_time = avg_time_per_epoch * remaining_epochs
+            
             logging.info(f"Epoch {epoch + 1}/{num_epochs}")
             logging.info(f"Average Loss: {avg_loss:.4f}")
+            logging.info(f"Best Loss: {best_loss:.4f}")
             logging.info(f"Mean Cosine Similarity: {metrics['mean_cosine_similarity']:.4f}")
             logging.info(f"Silhouette Score: {metrics['silhouette_score']:.4f}")
+            logging.info(f"Patience Counter: {patience_counter}/{early_stopping_patience}")
+            logging.info(f"Estimated time remaining: {remaining_time/3600:.1f} hours")
             
             # Track training progress
             track_training_progress(history)
+            
+            # Check for early stopping
+            if patience_counter >= early_stopping_patience:
+                logging.info(f"Early stopping triggered after {epoch + 1} epochs")
+                break
             
             # Save model checkpoint
             if (epoch + 1) % checkpoint_frequency == 0:
