@@ -73,7 +73,7 @@ def main():
         rna_seq_df = rna_seq_df.fillna(0)
         
         # Configuration
-        batch_size = 2 
+        batch_size = 1 
         num_samples = len(rna_seq_df)
         
         all_embeddings = []
