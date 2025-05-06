@@ -48,7 +48,7 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
     """Apply attention function with chunk-based processing.
     
     Args:
-        attention_fn: Original attention function
+        attention_fn: Original attention function (already transformed)
         x: Input tensor of shape [batch_size, seq_len] (token IDs) or [batch_size, seq_len, hidden_dim] (embeddings)
         chunk_size: Size of each chunk
         mask: Optional additional mask
@@ -94,7 +94,7 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
             chunk_mask = jnp.logical_and(chunk_mask, mask[:, :chunk_size, :chunk_size])
         
         # Apply attention with the mask
-        return attention_fn(x, mask=chunk_mask)
+        return attention_fn.apply(attention_fn.init(rng_key, x), rng_key, x, mask=chunk_mask)
     
     # Transform the function with Haiku once
     chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
@@ -140,7 +140,7 @@ def process_batch(batch_tokens, parameters, forward_fn, random_key, chunk_size):
     Args:
         batch_tokens: Input tokens of shape [batch_size, seq_len]
         parameters: Model parameters
-        forward_fn: Forward function
+        forward_fn: Forward function (already transformed)
         random_key: Random key
         chunk_size: Size of each chunk for attention
         
@@ -148,6 +148,9 @@ def process_batch(batch_tokens, parameters, forward_fn, random_key, chunk_size):
         Processed embeddings of shape [batch_size, hidden_dim]
     """
     try:
+        # Log input shape
+        logging.info(f"Input batch shape in process_batch: {batch_tokens.shape}")
+        
         # Create a wrapper function that handles the chunk-based attention
         def chunk_attention_forward_fn(x):
             # Apply the forward function with chunking
@@ -175,6 +178,10 @@ def process_batch(batch_tokens, parameters, forward_fn, random_key, chunk_size):
                 sub_chunk
             )
             
+            # Log shape after first sub-chunk
+            if i == 0:
+                logging.info(f"Output shape after first sub-chunk: {outs['embeddings_4'].shape}")
+            
             # Get embeddings and mean pool
             sub_chunk_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
             all_embeddings.append(sub_chunk_embeddings)
@@ -187,6 +194,7 @@ def process_batch(batch_tokens, parameters, forward_fn, random_key, chunk_size):
         
         # Combine all sub-chunk embeddings
         batch_embeddings = np.vstack(all_embeddings)
+        logging.info(f"Final batch embeddings shape: {batch_embeddings.shape}")
         return batch_embeddings
         
     except Exception as e:
@@ -211,7 +219,7 @@ def main():
         rna_seq_df = rna_seq_df.fillna(0)
         
         # Configuration
-        batch_size = 16
+        batch_size = 128
         attention_chunk_size = 512  
         processing_chunk_size = 512
         num_samples = len(rna_seq_df)
