@@ -13,7 +13,7 @@ import os
 from tqdm import tqdm
 import optax
 from sklearn.preprocessing import LabelEncoder
-import time  # Add time import
+import time  
 
 # Configure logging
 logging.basicConfig(
@@ -206,7 +206,7 @@ def main():
         )
         
         # Training configuration
-        batch_size = 10  
+        batch_size = 6  
         chunk_size = 128  
         processing_chunk_size = 150  
         num_epochs = 30
