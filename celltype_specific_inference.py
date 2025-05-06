@@ -45,11 +45,11 @@ def create_chunk_attention_mask(seq_len, chunk_size):
     return mask
 
 def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
-    """Apply attention function with chunk-based masking.
+    """Apply attention function with chunk-based processing.
     
     Args:
         attention_fn: Original attention function
-        x: Input tensor
+        x: Input tensor of shape [batch_size, seq_len, hidden_dim]
         chunk_size: Size of each chunk
         mask: Optional additional mask
         rng_key: Random key for initialization
@@ -57,44 +57,104 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
     Returns:
         Output tensor with chunk-based attention
     """
-    # Create chunk mask
-    seq_len = x.shape[1]
-    chunk_mask = create_chunk_attention_mask(seq_len, chunk_size)
+    batch_size, seq_len, hidden_dim = x.shape
     
-    # Combine with additional mask if provided
-    if mask is not None:
-        chunk_mask = jnp.logical_and(chunk_mask, mask)
+    # Initialize output tensor
+    output = jnp.zeros_like(x)
     
-    # Use provided rng_key or create a new one
+    # Initialize parameters once for the entire sequence
     if rng_key is None:
         rng_key = jax.random.PRNGKey(0)
     
-    # Apply the forward function without mask
-    # The attention mask will be handled internally by the model
-    return attention_fn.apply(attention_fn.init(rng_key, x), rng_key, x)
+    # Create a wrapper function that handles the chunk-based attention
+    def chunk_attention_forward_fn(x):
+        # Create attention mask for the current chunk
+        chunk_size = x.shape[1]
+        chunk_mask = jnp.ones((batch_size, chunk_size, chunk_size), dtype=bool)
+        
+        # Combine with additional mask if provided
+        if mask is not None:
+            chunk_mask = jnp.logical_and(chunk_mask, mask[:, :chunk_size, :chunk_size])
+        
+        # Apply attention with the mask
+        return attention_fn(x, mask=chunk_mask)
+    
+    # Transform the function with Haiku once
+    chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
+    
+    # Initialize parameters once
+    params = chunk_attention_forward_fn.init(rng_key, x[:, :chunk_size, :])
+    
+    # Process each chunk
+    for chunk_start in range(0, seq_len, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, seq_len)
+        
+        # Extract current chunk
+        chunk = x[:, chunk_start:chunk_end, :]
+        
+        # Process chunk using the same parameters
+        chunk_output = chunk_attention_forward_fn.apply(params, rng_key, chunk)
+        
+        # Store chunk output in the corresponding position
+        output = output.at[:, chunk_start:chunk_end, :].set(chunk_output)
+    
+    return output
 
 def process_batch(batch_tokens, parameters, forward_fn, random_key, chunk_size):
-    """Process a single batch of tokens with chunk-based attention."""
+    """Process a single batch of tokens with chunk-based attention.
+    
+    Args:
+        batch_tokens: Input tokens of shape [batch_size, seq_len]
+        parameters: Model parameters
+        forward_fn: Forward function
+        random_key: Random key
+        chunk_size: Size of each chunk for attention
+        
+    Returns:
+        Processed embeddings of shape [batch_size, hidden_dim]
+    """
     try:
         # Create a wrapper function that handles the chunk-based attention
         def chunk_attention_forward_fn(x):
-            # Apply the forward function
+            # Apply the forward function with chunking
             return apply_chunk_attention(forward_fn, x, chunk_size, rng_key=random_key)
         
-        # Transform the function with Haiku
+        # Transform the function with Haiku once
         chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
         
-        # Initialize parameters for the chunk attention function
-        chunk_params = chunk_attention_forward_fn.init(random_key, batch_tokens)
+        # Initialize parameters once
+        chunk_params = chunk_attention_forward_fn.init(random_key, batch_tokens[:, :chunk_size])
         
-        # Apply the function with both sets of parameters
-        outs = chunk_attention_forward_fn.apply(
-            {**parameters, **chunk_params},  # Combine both parameter sets
-            random_key,
-            batch_tokens
-        )
-        batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
+        # Process in smaller sub-chunks to avoid memory issues
+        batch_size = batch_tokens.shape[0]
+        sub_chunk_size = min(32, batch_size)  # Process at most 32 samples at once
+        all_embeddings = []
+        
+        for i in range(0, batch_size, sub_chunk_size):
+            sub_chunk_end = min(i + sub_chunk_size, batch_size)
+            sub_chunk = batch_tokens[i:sub_chunk_end]
+            
+            # Apply the function with the same parameters
+            outs = chunk_attention_forward_fn.apply(
+                {**parameters, **chunk_params},  # Combine both parameter sets
+                random_key,
+                sub_chunk
+            )
+            
+            # Get embeddings and mean pool
+            sub_chunk_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
+            all_embeddings.append(sub_chunk_embeddings)
+            
+            # Clear memory
+            del outs
+            del sub_chunk_embeddings
+            gc.collect()
+            jax.clear_caches()
+        
+        # Combine all sub-chunk embeddings
+        batch_embeddings = np.vstack(all_embeddings)
         return batch_embeddings
+        
     except Exception as e:
         logging.error(f"Error processing batch: {str(e)}")
         raise
@@ -117,9 +177,9 @@ def main():
         rna_seq_df = rna_seq_df.fillna(0)
         
         # Configuration
-        batch_size = 4
-        attention_chunk_size = 128  
-        processing_chunk_size = 150  
+        batch_size = 8
+        attention_chunk_size = 256  
+        processing_chunk_size = 256  
         num_samples = len(rna_seq_df)
         
         all_embeddings = []
