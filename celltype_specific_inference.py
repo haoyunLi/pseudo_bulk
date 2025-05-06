@@ -49,7 +49,7 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
     
     Args:
         attention_fn: Original attention function
-        x: Input tensor of shape [batch_size, seq_len, hidden_dim]
+        x: Input tensor of shape [batch_size, seq_len] (token IDs) or [batch_size, seq_len, hidden_dim] (embeddings)
         chunk_size: Size of each chunk
         mask: Optional additional mask
         rng_key: Random key for initialization
@@ -57,10 +57,27 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
     Returns:
         Output tensor with chunk-based attention
     """
-    batch_size, seq_len, hidden_dim = x.shape
+    # Log input shape
+    logging.info(f"Input tensor shape in apply_chunk_attention: {x.shape}")
+    
+    # Handle both 2D (token IDs) and 3D (embeddings) inputs
+    if len(x.shape) == 2:
+        batch_size, seq_len = x.shape
+        # forward_fn will handle the embedding internally
+        logging.info("Processing token IDs (2D input)")
+    elif len(x.shape) == 3:
+        batch_size, seq_len, hidden_dim = x.shape
+        logging.info("Processing pre-embedded vectors (3D input)")
+    else:
+        raise ValueError(f"Unexpected input shape: {x.shape}. Expected 2D (token IDs) or 3D (embeddings)")
     
     # Initialize output tensor
-    output = jnp.zeros_like(x)
+    if len(x.shape) == 2:
+        # For token IDs, we'll let forward_fn handle the embedding
+        output = jnp.zeros((batch_size, seq_len), dtype=x.dtype)
+    else:
+        # For embeddings, maintain the same shape
+        output = jnp.zeros_like(x)
     
     # Initialize parameters once for the entire sequence
     if rng_key is None:
@@ -83,20 +100,37 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
     chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
     
     # Initialize parameters once
-    params = chunk_attention_forward_fn.init(rng_key, x[:, :chunk_size, :])
+    if len(x.shape) == 2:
+        # For token IDs, use the first chunk for initialization
+        params = chunk_attention_forward_fn.init(rng_key, x[:, :chunk_size])
+    else:
+        # For embeddings, use the first chunk with full dimensions
+        params = chunk_attention_forward_fn.init(rng_key, x[:, :chunk_size, :])
     
     # Process each chunk
     for chunk_start in range(0, seq_len, chunk_size):
         chunk_end = min(chunk_start + chunk_size, seq_len)
         
         # Extract current chunk
-        chunk = x[:, chunk_start:chunk_end, :]
+        if len(x.shape) == 2:
+            chunk = x[:, chunk_start:chunk_end]
+        else:
+            chunk = x[:, chunk_start:chunk_end, :]
         
         # Process chunk using the same parameters
         chunk_output = chunk_attention_forward_fn.apply(params, rng_key, chunk)
         
+        # Log shape after first chunk to verify embedding
+        if chunk_start == 0:
+            logging.info(f"Output shape after first chunk: {chunk_output.shape}")
+        
         # Store chunk output in the corresponding position
-        output = output.at[:, chunk_start:chunk_end, :].set(chunk_output)
+        if len(x.shape) == 2:
+            # For token IDs, the output will be embeddings
+            output = output.at[:, chunk_start:chunk_end].set(chunk_output)
+        else:
+            # For embeddings, maintain the same shape
+            output = output.at[:, chunk_start:chunk_end, :].set(chunk_output)
     
     return output
 
