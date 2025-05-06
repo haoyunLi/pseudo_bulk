@@ -206,7 +206,7 @@ def main():
         )
         
         # Training configuration
-        batch_size = 6  
+        batch_size = 4  
         chunk_size = 128  
         processing_chunk_size = 150  
         num_epochs = 30
