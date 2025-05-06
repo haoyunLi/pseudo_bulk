@@ -220,9 +220,9 @@ def main():
         rna_seq_df = rna_seq_df.fillna(0)
         
         # Configuration
-        batch_size = 64  
-        attention_chunk_size = 256  
-        processing_chunk_size = 256  # Match attention_chunk_size for consistency
+        batch_size = 32  # Reduced to avoid memory issues
+        attention_chunk_size = 128  # Reduced to match model's expectations
+        processing_chunk_size = 128  # Match attention_chunk_size for consistency
         num_samples = len(rna_seq_df)
         
         all_embeddings = []
@@ -249,7 +249,8 @@ def main():
                 chunk_embeddings = np.zeros((len(chunk_df), embedding_dim), dtype=np.float32)
                 
                 for i in range(0, len(tokens), batch_size):
-                    batch_tokens = tokens[i:i + batch_size]
+                    batch_end = min(i + batch_size, len(tokens))
+                    batch_tokens = tokens[i:batch_end]
                     random_key = jax.random.PRNGKey(0)
                     
                     try:
