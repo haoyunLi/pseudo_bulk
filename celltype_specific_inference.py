@@ -99,17 +99,17 @@ def apply_chunk_attention(attention_fn, x, chunk_size, mask=None, rng_key=None):
     # Transform the function with Haiku once
     chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
     
-    # Initialize parameters once
+    # Initialize parameters once with a small chunk
+    init_chunk_size = min(chunk_size, 128)  # Use smaller size for initialization
     if len(x.shape) == 2:
-        # For token IDs, use the first chunk for initialization
-        params = chunk_attention_forward_fn.init(rng_key, x[:, :chunk_size])
+        params = chunk_attention_forward_fn.init(rng_key, x[:, :init_chunk_size])
     else:
-        # For embeddings, use the first chunk with full dimensions
-        params = chunk_attention_forward_fn.init(rng_key, x[:, :chunk_size, :])
+        params = chunk_attention_forward_fn.init(rng_key, x[:, :init_chunk_size, :])
     
     # Process each chunk
     for chunk_start in range(0, seq_len, chunk_size):
         chunk_end = min(chunk_start + chunk_size, seq_len)
+        current_chunk_size = chunk_end - chunk_start
         
         # Extract current chunk
         if len(x.shape) == 2:
@@ -159,8 +159,9 @@ def process_batch(batch_tokens, parameters, forward_fn, random_key, chunk_size):
         # Transform the function with Haiku once
         chunk_attention_forward_fn = hk.transform(chunk_attention_forward_fn)
         
-        # Initialize parameters once
-        chunk_params = chunk_attention_forward_fn.init(random_key, batch_tokens[:, :chunk_size])
+        # Initialize parameters once with a small chunk
+        init_chunk_size = min(chunk_size, 128)  # Use smaller size for initialization
+        chunk_params = chunk_attention_forward_fn.init(random_key, batch_tokens[:, :init_chunk_size])
         
         # Process in smaller sub-chunks to avoid memory issues
         batch_size = batch_tokens.shape[0]
@@ -219,9 +220,9 @@ def main():
         rna_seq_df = rna_seq_df.fillna(0)
         
         # Configuration
-        batch_size = 128
-        attention_chunk_size = 512  
-        processing_chunk_size = 512
+        batch_size = 64  
+        attention_chunk_size = 256  
+        processing_chunk_size = 256  # Match attention_chunk_size for consistency
         num_samples = len(rna_seq_df)
         
         all_embeddings = []
