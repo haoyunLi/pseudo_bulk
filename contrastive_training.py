@@ -206,10 +206,10 @@ def main():
         )
         
         # Training configuration
-        batch_size = 16  # Reduced for memory efficiency
-        chunk_size = 128  # Reduced for memory efficiency
-        processing_chunk_size = 250  # Reduced for memory efficiency
-        num_epochs = 50
+        batch_size = 10  
+        chunk_size = 128  
+        processing_chunk_size = 150  
+        num_epochs = 30
         learning_rate = 1e-4
         checkpoint_frequency = 5
         
