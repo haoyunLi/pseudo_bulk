@@ -89,8 +89,8 @@ def process_batch(batch_tokens, parameters, forward_fn, rng_key):
         logging.error(f"Error processing batch: {str(e)}")
         raise
 
-def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key):
-    """Perform a single training step."""
+def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key, grad_accum_steps=1):
+    """Perform a single training step with gradient accumulation."""
     def loss_fn(params):
         return compute_contrastive_loss(
             pseudobulk_batch,
@@ -102,6 +102,9 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
     
     # Compute loss and gradients
     loss, grads = jax.value_and_grad(loss_fn)(params)
+    
+    # Scale gradients by accumulation steps
+    grads = jax.tree_map(lambda x: x / grad_accum_steps, grads)
     
     # Update parameters
     updates, opt_state = optimizer.update(grads, opt_state)
@@ -146,7 +149,8 @@ def main():
         )
         
         # Training configuration
-        batch_size = 2  # Can be increased to 4-8 once stable
+        batch_size = 1  # Reduced to 1 to handle memory constraints
+        grad_accum_steps = 8  # Accumulate gradients over 8 steps to maintain effective batch size
         num_epochs = 50
         learning_rate = 1e-4
         checkpoint_frequency = 5
@@ -197,7 +201,8 @@ def main():
                     celltype_batch,
                     forward_fn,
                     optimizer,
-                    rng_key
+                    rng_key,
+                    grad_accum_steps
                 )
                 
                 epoch_loss += batch_loss
