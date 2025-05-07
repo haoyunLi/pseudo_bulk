@@ -13,7 +13,7 @@ import os
 from tqdm import tqdm
 import optax
 from sklearn.preprocessing import LabelEncoder
-import time
+import pickle
 
 # Configure logging
 logging.basicConfig(
@@ -26,13 +26,6 @@ logging.basicConfig(
 jax.config.update('jax_platform_name', 'gpu')
 jax.config.update('jax_default_matmul_precision', jax.lax.Precision.DEFAULT)
 jax.config.update('jax_enable_x64', False)
-jax.config.update('jax_disable_jit', False)  # Enable JIT compilation
-jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
-
-# Configure GPU memory growth
-os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.7'  # Use 70% of available GPU memory
-os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'  # Don't preallocate all GPU memory
-
 
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     """Load and preprocess both pseudobulk and celltype-specific data."""
@@ -73,29 +66,18 @@ def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     # Log data shapes
     logging.info(f"Pseudobulk data shape: {pseudobulk_df.shape}")
     logging.info(f"Celltype data shape: {celltype_df.shape}")
-    logging.info(f"Pseudobulk token shape: {pseudobulk_tokens.shape}")
-    logging.info(f"Celltype token shape: {celltype_tokens.shape}")
     logging.info(f"Number of unique labels: {len(np.unique(labels))}")
     
     return pseudobulk_tokens, celltype_tokens, pseudobulk_df.index, celltype_df.index, labels, label_encoder
 
-def process_batch(batch_tokens, parameters, forward_fn, rng_key):
-    """Process a batch of tokens with regular attention."""
-    try:
-        # Apply the forward function
-        outs = forward_fn.apply(parameters, rng_key, batch_tokens)
-        
-        # Get embeddings and mean pool
-        batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
-        
-        return batch_embeddings
-        
-    except Exception as e:
-        logging.error(f"Error processing batch: {str(e)}")
-        raise
+def create_batches(tokens, batch_size):
+    """Create batches from tokens."""
+    num_samples = len(tokens)
+    for i in range(0, num_samples, batch_size):
+        yield tokens[i:i + batch_size]
 
-def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key, grad_accum_steps=1):
-    """Perform a single training step with gradient accumulation."""
+def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key):
+    """Perform a single training step."""
     def loss_fn(params):
         return compute_contrastive_loss(
             pseudobulk_batch,
@@ -108,27 +90,11 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
     # Compute loss and gradients
     loss, grads = jax.value_and_grad(loss_fn)(params)
     
-    # Scale gradients by accumulation steps
-    grads = jax.tree_map(lambda x: x / grad_accum_steps, grads)
-    
     # Update parameters
     updates, opt_state = optimizer.update(grads, opt_state)
     params = optax.apply_updates(params, updates)
     
     return params, opt_state, loss
-
-def save_checkpoint(parameters, opt_state, epoch, loss, metrics, path):
-    """Save model checkpoint with metrics."""
-    with open(path, 'wb') as f:
-        import pickle
-        pickle.dump({
-            'parameters': parameters,
-            'opt_state': opt_state,
-            'epoch': epoch,
-            'loss': loss,
-            'metrics': metrics
-        }, f)
-    logging.info(f"Saved checkpoint to {path}")
 
 def main():
     try:
@@ -153,24 +119,15 @@ def main():
             tokenizer
         )
         
-        # Training configuration
-        batch_size = 1  # Reduced to 1 to handle memory constraints
-        grad_accum_steps = 8  # Accumulate gradients over 8 steps to maintain effective batch size
+        # Training parameters
+        batch_size = 1
         num_epochs = 50
         learning_rate = 1e-4
-        checkpoint_frequency = 5
+        patience = 5  # Number of epochs to wait for improvement
+        min_delta = 0.001  # Minimum change in metric to be considered as improvement
         
-        # Early stopping configuration
-        early_stopping_patience = 5
-        early_stopping_min_delta = 1e-4
-        best_loss = float('inf')
-        patience_counter = 0
-        
-        # Initialize optimizer with gradient clipping
-        optimizer = optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.adam(learning_rate)
-        )
+        # Initialize optimizer
+        optimizer = optax.adam(learning_rate)
         opt_state = optimizer.init(parameters)
         
         # Initialize training history
@@ -178,13 +135,14 @@ def main():
             'epoch': [],
             'loss': [],
             'mean_cosine_similarity': [],
-            'silhouette_score': [],
-            'best_loss': [],
-            'patience_counter': []
+            'silhouette_score': []
         }
         
-        # Start time tracking
-        start_time = time.time()
+        # Early stopping variables
+        best_metric = float('-inf')
+        best_epoch = 0
+        best_params = None
+        no_improvement_count = 0
         
         # Training loop
         logging.info("Starting training...")
@@ -192,13 +150,14 @@ def main():
             epoch_loss = 0
             num_batches = 0
             
-            # Process data in batches
-            for i in range(0, len(pseudobulk_tokens), batch_size):
-                batch_end = min(i + batch_size, len(pseudobulk_tokens))
-                pseudobulk_batch = pseudobulk_tokens[i:batch_end]
-                celltype_batch = celltype_tokens[i:batch_end]
-                
-                rng_key = jax.random.PRNGKey(epoch * 1000 + i)
+            # Create batches
+            pseudobulk_batches = create_batches(pseudobulk_tokens, batch_size)
+            celltype_batches = create_batches(celltype_tokens, batch_size)
+            
+            # Process batches
+            for pseudobulk_batch, celltype_batch in tqdm(zip(pseudobulk_batches, celltype_batches), 
+                                                       desc=f"Epoch {epoch + 1}/{num_epochs}"):
+                rng_key = jax.random.PRNGKey(epoch)
                 parameters, opt_state, batch_loss = train_step(
                     parameters,
                     opt_state,
@@ -206,106 +165,88 @@ def main():
                     celltype_batch,
                     forward_fn,
                     optimizer,
-                    rng_key,
-                    grad_accum_steps
+                    rng_key
                 )
                 
                 epoch_loss += batch_loss
                 num_batches += 1
                 
-                # Clear memory after each batch
-                if i % 5 == 0:  # More frequent cleanup
-                    gc.collect()
-                    jax.clear_caches()
+                # Clear memory
+                gc.collect()
+                jax.clear_caches()
             
             # Compute average loss
             avg_loss = epoch_loss / num_batches
             
             # Compute embeddings for evaluation
-            logging.info("Computing embeddings for evaluation...")
             pseudobulk_embeddings = []
             celltype_embeddings = []
             
-            # Process pseudobulk data in batches
-            for i in range(0, len(pseudobulk_tokens), batch_size):
-                batch_end = min(i + batch_size, len(pseudobulk_tokens))
-                batch = pseudobulk_tokens[i:batch_end]
-                batch_embeddings = process_batch(batch, parameters, forward_fn, jax.random.PRNGKey(0))
+            for batch in create_batches(pseudobulk_tokens, batch_size):
+                outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), batch)
+                batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1))
                 pseudobulk_embeddings.append(batch_embeddings)
-                del batch
-                del batch_embeddings
-                gc.collect()
             
-            # Process celltype data in batches
-            for i in range(0, len(celltype_tokens), batch_size):
-                batch_end = min(i + batch_size, len(celltype_tokens))
-                batch = celltype_tokens[i:batch_end]
-                batch_embeddings = process_batch(batch, parameters, forward_fn, jax.random.PRNGKey(0))
+            for batch in create_batches(celltype_tokens, batch_size):
+                outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), batch)
+                batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1))
                 celltype_embeddings.append(batch_embeddings)
-                del batch
-                del batch_embeddings
-                gc.collect()
             
-            # Combine embeddings
             pseudobulk_embeddings = np.vstack(pseudobulk_embeddings)
             celltype_embeddings = np.vstack(celltype_embeddings)
             
             # Compute metrics
             metrics = compute_similarity_metrics(pseudobulk_embeddings, celltype_embeddings, labels)
-            
-            # Early stopping check
-            if avg_loss < (best_loss - early_stopping_min_delta):
-                best_loss = avg_loss
-                patience_counter = 0
-                # Save best model with metrics
-                save_checkpoint(
-                    parameters, opt_state, epoch + 1, avg_loss, metrics,
-                    "checkpoints/best_model.pkl"
-                )
-                logging.info(f"New best model saved with loss: {avg_loss:.4f}")
-            else:
-                patience_counter += 1
-                logging.info(f"No improvement for {patience_counter} epochs")
+            current_metric = metrics['mean_cosine_similarity']
             
             # Update history
             history['epoch'].append(epoch + 1)
             history['loss'].append(avg_loss)
-            history['mean_cosine_similarity'].append(metrics['mean_cosine_similarity'])
+            history['mean_cosine_similarity'].append(current_metric)
             history['silhouette_score'].append(metrics['silhouette_score'])
-            history['best_loss'].append(best_loss)
-            history['patience_counter'].append(patience_counter)
             
             # Log epoch statistics
-            elapsed_time = time.time() - start_time
-            avg_time_per_epoch = elapsed_time / (epoch + 1)
-            remaining_epochs = min(
-                num_epochs - epoch - 1,
-                early_stopping_patience - patience_counter
-            )
-            remaining_time = avg_time_per_epoch * remaining_epochs
-            
             logging.info(f"Epoch {epoch + 1}/{num_epochs}")
             logging.info(f"Average Loss: {avg_loss:.4f}")
-            logging.info(f"Best Loss: {best_loss:.4f}")
-            logging.info(f"Mean Cosine Similarity: {metrics['mean_cosine_similarity']:.4f}")
+            logging.info(f"Mean Cosine Similarity: {current_metric:.4f}")
             logging.info(f"Silhouette Score: {metrics['silhouette_score']:.4f}")
-            logging.info(f"Patience Counter: {patience_counter}/{early_stopping_patience}")
-            logging.info(f"Estimated time remaining: {remaining_time/3600:.1f} hours")
             
             # Track training progress
             track_training_progress(history)
             
-            # Check for early stopping
-            if patience_counter >= early_stopping_patience:
-                logging.info(f"Early stopping triggered after {epoch + 1} epochs")
-                break
+            # Early stopping check
+            if current_metric > best_metric + min_delta:
+                best_metric = current_metric
+                best_epoch = epoch
+                best_params = parameters
+                no_improvement_count = 0
+                
+                # Save best model
+                checkpoint_path = "checkpoints/best_model.pkl"
+                with open(checkpoint_path, 'wb') as f:
+                    pickle.dump(best_params, f)
+                logging.info(f"New best model saved! Metric: {best_metric:.4f}")
+            else:
+                no_improvement_count += 1
+                logging.info(f"No improvement for {no_improvement_count} epochs")
             
-            # Save model checkpoint
-            if (epoch + 1) % checkpoint_frequency == 0:
-                save_checkpoint(
-                    parameters, opt_state, epoch + 1, avg_loss, metrics,
-                    f"checkpoints/model_epoch_{epoch + 1}.pkl"
-                )
+            # Save regular checkpoint
+            if (epoch + 1) % 5 == 0:
+                checkpoint_path = f"checkpoints/model_epoch_{epoch + 1}.pkl"
+                with open(checkpoint_path, 'wb') as f:
+                    pickle.dump(parameters, f)
+                logging.info(f"Saved checkpoint to {checkpoint_path}")
+            
+            # Early stopping
+            if no_improvement_count >= patience:
+                logging.info(f"Early stopping triggered! No improvement for {patience} epochs")
+                logging.info(f"Best model was from epoch {best_epoch + 1} with metric {best_metric:.4f}")
+                break
+        
+        # Load best model for final evaluation
+        if best_params is not None:
+            parameters = best_params
+            logging.info("Loading best model for final evaluation...")
         
         # Final evaluation
         logging.info("Performing final evaluation...")
