@@ -175,7 +175,7 @@ def main():
         )
         
         # Training configuration optimized for A100
-        batch_size = 4  # Increased for A100
+        batch_size = 1  
         grad_accum_steps = 4  # Reduced since we have more memory
         num_epochs = 50
         learning_rate = 1e-4
