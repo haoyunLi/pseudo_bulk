@@ -22,12 +22,38 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
+# Log GPU information
+logging.info("Checking GPU availability...")
+try:
+    devices = jax.devices()
+    logging.info(f"Available devices: {devices}")
+    for device in devices:
+        logging.info(f"Device: {device}, Platform: {device.platform}, Memory: {device.memory_limit / 1e9:.1f}GB")
+except Exception as e:
+    logging.warning(f"Could not get device info: {str(e)}")
+
 # Configure JAX for memory efficiency
 jax.config.update('jax_platform_name', 'gpu')
 jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
 jax.config.update('jax_enable_x64', False)
 jax.config.update('jax_disable_jit', False)  # Enable JIT compilation
 jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
+
+def chunk_sequence(sequence, chunk_size=1000):
+    """Split a sequence into smaller chunks."""
+    return np.array_split(sequence, sequence.shape[1] // chunk_size + 1, axis=1)
+
+def process_chunked_sequence(chunks, parameters, forward_fn, rng_key):
+    """Process a sequence in chunks and combine results."""
+    chunk_embeddings = []
+    for chunk in chunks:
+        # Process each chunk
+        outs = forward_fn.apply(parameters, rng_key, chunk)
+        chunk_emb = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
+        chunk_embeddings.append(chunk_emb)
+    
+    # Combine chunk embeddings
+    return np.mean(chunk_embeddings, axis=0)
 
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     """Load and preprocess both pseudobulk and celltype-specific data."""
@@ -74,14 +100,14 @@ def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     
     return pseudobulk_tokens, celltype_tokens, pseudobulk_df.index, celltype_df.index, labels, label_encoder
 
-def process_batch(batch_tokens, parameters, forward_fn, rng_key):
-    """Process a batch of tokens with regular attention."""
+def process_batch(batch_tokens, parameters, forward_fn, rng_key, chunk_size=1000):
+    """Process a batch of tokens with chunked attention."""
     try:
-        # Apply the forward function
-        outs = forward_fn.apply(parameters, rng_key, batch_tokens)
+        # Split sequence into chunks
+        chunks = chunk_sequence(batch_tokens, chunk_size)
         
-        # Get embeddings and mean pool
-        batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
+        # Process chunks and combine results
+        batch_embeddings = process_chunked_sequence(chunks, parameters, forward_fn, rng_key)
         
         return batch_embeddings
         
@@ -148,9 +174,9 @@ def main():
             tokenizer
         )
         
-        # Training configuration
-        batch_size = 1  # Reduced to 1 to handle memory constraints
-        grad_accum_steps = 8  # Accumulate gradients over 8 steps to maintain effective batch size
+        # Training configuration optimized for A100
+        batch_size = 4  # Increased for A100
+        grad_accum_steps = 4  # Reduced since we have more memory
         num_epochs = 50
         learning_rate = 1e-4
         checkpoint_frequency = 5
@@ -225,7 +251,7 @@ def main():
             for i in range(0, len(pseudobulk_tokens), batch_size):
                 batch_end = min(i + batch_size, len(pseudobulk_tokens))
                 batch = pseudobulk_tokens[i:batch_end]
-                batch_embeddings = process_batch(batch, parameters, forward_fn, jax.random.PRNGKey(0))
+                batch_embeddings = process_batch(batch, parameters, forward_fn, jax.random.PRNGKey(0), chunk_size)
                 pseudobulk_embeddings.append(batch_embeddings)
                 del batch
                 del batch_embeddings
@@ -235,7 +261,7 @@ def main():
             for i in range(0, len(celltype_tokens), batch_size):
                 batch_end = min(i + batch_size, len(celltype_tokens))
                 batch = celltype_tokens[i:batch_end]
-                batch_embeddings = process_batch(batch, parameters, forward_fn, jax.random.PRNGKey(0))
+                batch_embeddings = process_batch(batch, parameters, forward_fn, jax.random.PRNGKey(0), chunk_size)
                 celltype_embeddings.append(batch_embeddings)
                 del batch
                 del batch_embeddings
