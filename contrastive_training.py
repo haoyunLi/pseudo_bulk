@@ -60,8 +60,8 @@ def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     
     # Tokenize the data
     logging.info("Tokenizing data...")
-    pseudobulk_tokens = jnp.asarray(tokenizer.batch_tokenize(pseudobulk_array), dtype=jnp.int16)
-    celltype_tokens = jnp.asarray(tokenizer.batch_tokenize(celltype_array), dtype=jnp.int16)
+    pseudobulk_tokens = jnp.asarray(tokenizer.batch_tokenize(pseudobulk_array), dtype=jnp.int32)
+    celltype_tokens = jnp.asarray(tokenizer.batch_tokenize(celltype_array), dtype=jnp.int32)
     
     # Log data shapes
     logging.info(f"Pseudobulk data shape: {pseudobulk_df.shape}")
@@ -184,12 +184,12 @@ def main():
             
             for batch in create_batches(pseudobulk_tokens, batch_size):
                 outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), batch)
-                batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
+                batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1))
                 pseudobulk_embeddings.append(batch_embeddings)
             
             for batch in create_batches(celltype_tokens, batch_size):
                 outs = forward_fn.apply(parameters, jax.random.PRNGKey(0), batch)
-                batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1), dtype=np.float32)
+                batch_embeddings = np.array(outs["embeddings_4"].mean(axis=1))
                 celltype_embeddings.append(batch_embeddings)
             
             pseudobulk_embeddings = np.vstack(pseudobulk_embeddings)
