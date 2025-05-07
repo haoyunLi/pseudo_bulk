@@ -29,6 +29,10 @@ jax.config.update('jax_enable_x64', False)
 jax.config.update('jax_disable_jit', False)  # Enable JIT compilation
 jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
 
+# Configure GPU memory growth
+os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.7'  # Use 70% of available GPU memory
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'  # Don't preallocate all GPU memory
+
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     """Load and preprocess both pseudobulk and celltype-specific data."""
     # Load pseudobulk data
@@ -92,13 +96,29 @@ def process_batch(batch_tokens, parameters, forward_fn, rng_key):
 def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key, grad_accum_steps=1):
     """Perform a single training step with gradient accumulation."""
     def loss_fn(params):
-        return compute_contrastive_loss(
-            pseudobulk_batch,
-            celltype_batch,
-            forward_fn,
-            params,
-            rng_key
-        )
+        # Process celltype data in smaller chunks
+        chunk_size = 100  # Process 100 celltype samples at a time
+        total_loss = 0.0
+        
+        for i in range(0, len(celltype_batch), chunk_size):
+            chunk_end = min(i + chunk_size, len(celltype_batch))
+            celltype_chunk = celltype_batch[i:chunk_end]
+            
+            # Compute loss for this chunk
+            chunk_loss = compute_contrastive_loss(
+                pseudobulk_batch,
+                celltype_chunk,
+                forward_fn,
+                params,
+                rng_key
+            )
+            total_loss += chunk_loss * (chunk_end - i) / len(celltype_batch)
+            
+            # Clear memory after each chunk
+            gc.collect()
+            jax.clear_caches()
+        
+        return total_loss
     
     # Compute loss and gradients
     loss, grads = jax.value_and_grad(loss_fn)(params)
@@ -149,8 +169,8 @@ def main():
         )
         
         # Training configuration
-        batch_size = 1  # Reduced to 1 to handle memory constraints
-        grad_accum_steps = 8  # Accumulate gradients over 8 steps to maintain effective batch size
+        batch_size = 1  # Keep batch size at 1
+        grad_accum_steps = 16  # Increase gradient accumulation steps to 16
         num_epochs = 50
         learning_rate = 1e-4
         checkpoint_frequency = 5
@@ -161,7 +181,7 @@ def main():
         best_loss = float('inf')
         patience_counter = 0
         
-        # Initialize optimizer with gradient clipping
+        # Initialize optimizer with gradient clipping and memory optimizations
         optimizer = optax.chain(
             optax.clip_by_global_norm(1.0),
             optax.adam(learning_rate)
@@ -209,9 +229,10 @@ def main():
                 num_batches += 1
                 
                 # Clear memory after each batch
-                if i % 5 == 0:  # More frequent cleanup
+                if i % 2 == 0:  # More frequent cleanup
                     gc.collect()
                     jax.clear_caches()
+                    jax.clear_backends()
             
             # Compute average loss
             avg_loss = epoch_loss / num_batches
