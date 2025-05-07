@@ -14,6 +14,9 @@ from tqdm import tqdm
 import optax
 from sklearn.preprocessing import LabelEncoder
 import time
+import glob
+import json
+from sklearn.metrics import silhouette_score
 
 # Configure logging
 logging.basicConfig(
@@ -59,24 +62,50 @@ def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     label_encoder = LabelEncoder()
     labels = label_encoder.fit_transform(labels)
     
-    # Preprocess data for the model
-    logging.info("Preprocessing data for model...")
-    pseudobulk_array = preprocess_rna_seq_for_bulkrnabert(pseudobulk_df, config)
-    celltype_array = preprocess_rna_seq_for_bulkrnabert(celltype_df, config)
+    # Create output directories for chunks
+    os.makedirs('data/chunks/pseudobulk', exist_ok=True)
+    os.makedirs('data/chunks/celltype', exist_ok=True)
     
-    # Tokenize the data
-    logging.info("Tokenizing data...")
-    pseudobulk_tokens = jnp.asarray(tokenizer.batch_tokenize(pseudobulk_array), dtype=jnp.int32)
-    celltype_tokens = jnp.asarray(tokenizer.batch_tokenize(celltype_array), dtype=jnp.int32)
+    # Preprocess data for the model in chunks
+    logging.info("Preprocessing data for model...")
+    chunk_size = 1000  # Process 1000 samples at a time
+    
+    # Process pseudobulk data in chunks
+    num_pseudobulk_chunks = (len(pseudobulk_df) + chunk_size - 1) // chunk_size
+    for i in range(num_pseudobulk_chunks):
+        chunk = pseudobulk_df.iloc[i*chunk_size:(i+1)*chunk_size]
+        chunk_array = preprocess_rna_seq_for_bulkrnabert(chunk, config)
+        chunk_tokens = jnp.asarray(tokenizer.batch_tokenize(chunk_array), dtype=jnp.int32)
+        
+        # Save chunk to disk
+        np.save(f'data/chunks/pseudobulk/chunk_{i}.npy', np.array(chunk_tokens))
+        del chunk_array
+        del chunk_tokens
+        gc.collect()
+        jax.clear_caches()
+    
+    # Process celltype data in chunks
+    num_celltype_chunks = (len(celltype_df) + chunk_size - 1) // chunk_size
+    for i in range(num_celltype_chunks):
+        chunk = celltype_df.iloc[i*chunk_size:(i+1)*chunk_size]
+        chunk_array = preprocess_rna_seq_for_bulkrnabert(chunk, config)
+        chunk_tokens = jnp.asarray(tokenizer.batch_tokenize(chunk_array), dtype=jnp.int32)
+        
+        # Save chunk to disk
+        np.save(f'data/chunks/celltype/chunk_{i}.npy', np.array(chunk_tokens))
+        del chunk_array
+        del chunk_tokens
+        gc.collect()
+        jax.clear_caches()
     
     # Log data shapes
     logging.info(f"Pseudobulk data shape: {pseudobulk_df.shape}")
     logging.info(f"Celltype data shape: {celltype_df.shape}")
-    logging.info(f"Pseudobulk token shape: {pseudobulk_tokens.shape}")
-    logging.info(f"Celltype token shape: {celltype_tokens.shape}")
+    logging.info(f"Number of pseudobulk chunks: {num_pseudobulk_chunks}")
+    logging.info(f"Number of celltype chunks: {num_celltype_chunks}")
     logging.info(f"Number of unique labels: {len(np.unique(labels))}")
     
-    return pseudobulk_tokens, celltype_tokens, pseudobulk_df.index, celltype_df.index, labels, label_encoder
+    return pseudobulk_df.index, celltype_df.index, labels, label_encoder, num_pseudobulk_chunks, num_celltype_chunks
 
 def process_batch(batch_tokens, parameters, forward_fn, rng_key):
     """Process a batch of tokens with regular attention."""
@@ -145,6 +174,189 @@ def save_checkpoint(parameters, opt_state, epoch, loss, metrics, path):
         }, f)
     logging.info(f"Saved checkpoint to {path}")
 
+def process_batch_from_chunks(chunk_idx, batch_idx, batch_size, chunk_dir):
+    """Load a specific batch from a chunk file."""
+    chunk = np.load(f'{chunk_dir}/chunk_{chunk_idx}.npy')
+    start_idx = batch_idx * batch_size
+    end_idx = min(start_idx + batch_size, len(chunk))
+    batch = chunk[start_idx:end_idx]
+    return batch
+
+def compute_metrics_streaming(embeddings_dir, num_chunks, labels, chunk_size=1000):
+    """Compute metrics in a streaming way without loading all embeddings at once."""
+    # Initialize metrics accumulators
+    total_cosine_sim = 0.0
+    total_samples = 0
+    
+    # Process chunks in batches
+    for chunk_idx in range(num_chunks):
+        # Load chunk embeddings
+        chunk_embeddings = np.load(f'{embeddings_dir}/chunk_{chunk_idx}.npy')
+        
+        # Process chunk in smaller batches
+        for i in range(0, len(chunk_embeddings), chunk_size):
+            batch_end = min(i + chunk_size, len(chunk_embeddings))
+            batch_embeddings = chunk_embeddings[i:batch_end]
+            batch_labels = labels[i:batch_end]
+            
+            # Compute cosine similarity for this batch
+            batch_cosine_sim = np.mean(np.dot(batch_embeddings, batch_embeddings.T))
+            total_cosine_sim += batch_cosine_sim * len(batch_embeddings)
+            total_samples += len(batch_embeddings)
+            
+            # Clear memory
+            del batch_embeddings
+            gc.collect()
+            jax.clear_caches()
+        
+        # Clear chunk memory
+        del chunk_embeddings
+        gc.collect()
+        jax.clear_caches()
+    
+    # Compute final metrics
+    mean_cosine_similarity = total_cosine_sim / total_samples if total_samples > 0 else 0.0
+    
+    return {
+        'mean_cosine_similarity': mean_cosine_similarity,
+        'silhouette_score': 0.0  # Silhouette score requires all data, so we'll skip it
+    }
+
+def save_embeddings_memmap(chunk_dir, output_path, expected_shape, dtype=np.float32):
+    """Save embeddings using memory-mapped arrays, handling multiple chunk files."""
+    # Get all chunk files and sort them
+    chunk_files = sorted(glob.glob(f'{chunk_dir}/chunk_*.npy'))
+    if not chunk_files:
+        raise ValueError(f"No chunk files found in {chunk_dir}")
+    
+    # Load first chunk to get embedding dimension
+    first_chunk = np.load(chunk_files[0])
+    embedding_dim = first_chunk.shape[1]
+    del first_chunk
+    gc.collect()
+    
+    # Create memory-mapped array with correct shape
+    total_samples = expected_shape[0]
+    fp = np.memmap(output_path, dtype=dtype, mode='w+', shape=(total_samples, embedding_dim))
+    
+    # Write data in chunks
+    current_idx = 0
+    for chunk_file in chunk_files:
+        chunk = np.load(chunk_file)
+        chunk_size = len(chunk)
+        fp[current_idx:current_idx + chunk_size] = chunk
+        current_idx += chunk_size
+        del chunk
+        gc.collect()
+    
+    # Flush changes to disk
+    fp.flush()
+    del fp
+
+def compute_approximate_silhouette(embeddings_dir, num_chunks, labels, sample_size=1000):
+    """Compute approximate silhouette score using subsampling."""
+    # Get all chunk files
+    chunk_files = sorted(glob.glob(f'{embeddings_dir}/chunk_*.npy'))
+    if not chunk_files:
+        return 0.0
+    
+    # Randomly sample indices
+    total_samples = sum(len(np.load(f)) for f in chunk_files)
+    sample_indices = np.random.choice(total_samples, min(sample_size, total_samples), replace=False)
+    sample_indices.sort()  # Sort for efficient loading
+    
+    # Load sampled data
+    sampled_embeddings = []
+    sampled_labels = []
+    current_idx = 0
+    
+    for chunk_file in chunk_files:
+        chunk = np.load(chunk_file)
+        chunk_size = len(chunk)
+        
+        # Find indices that fall in this chunk
+        chunk_indices = sample_indices[(sample_indices >= current_idx) & 
+                                     (sample_indices < current_idx + chunk_size)]
+        if len(chunk_indices) > 0:
+            # Convert to local indices
+            local_indices = chunk_indices - current_idx
+            sampled_embeddings.append(chunk[local_indices])
+            sampled_labels.append(labels[chunk_indices])
+        
+        current_idx += chunk_size
+        del chunk
+        gc.collect()
+    
+    if not sampled_embeddings:
+        return 0.0
+    
+    # Combine sampled data
+    sampled_embeddings = np.vstack(sampled_embeddings)
+    sampled_labels = np.concatenate(sampled_labels)
+    
+    # Compute silhouette score on sampled data
+    try:
+        score = silhouette_score(sampled_embeddings, sampled_labels)
+    except Exception as e:
+        logging.warning(f"Error computing silhouette score: {str(e)}")
+        score = 0.0
+    
+    # Clean up
+    del sampled_embeddings
+    del sampled_labels
+    gc.collect()
+    
+    return score
+
+def evaluate_model_streaming(embeddings_dir, num_chunks, labels, output_dir='final_evaluation'):
+    """Evaluate model performance in a streaming way."""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Initialize metrics
+    metrics = {
+        'mean_cosine_similarity': 0.0,
+        'silhouette_score': 0.0
+    }
+    
+    # Compute metrics in streaming fashion
+    total_cosine_sim = 0.0
+    total_samples = 0
+    
+    # Process each chunk
+    for chunk_idx in range(num_chunks):
+        chunk_path = f'{embeddings_dir}/chunk_{chunk_idx}.npy'
+        if not os.path.exists(chunk_path):
+            continue
+            
+        # Load chunk
+        chunk = np.load(chunk_path)
+        chunk_size = len(chunk)
+        
+        # Compute cosine similarity for this chunk
+        chunk_cosine_sim = np.mean(np.dot(chunk, chunk.T))
+        total_cosine_sim += chunk_cosine_sim * chunk_size
+        total_samples += chunk_size
+        
+        # Clear memory
+        del chunk
+        gc.collect()
+        jax.clear_caches()
+    
+    # Compute final metrics
+    if total_samples > 0:
+        metrics['mean_cosine_similarity'] = total_cosine_sim / total_samples
+    
+    # Compute approximate silhouette score
+    metrics['silhouette_score'] = compute_approximate_silhouette(
+        embeddings_dir, num_chunks, labels
+    )
+    
+    # Save metrics
+    with open(os.path.join(output_dir, 'metrics.json'), 'w') as f:
+        json.dump(metrics, f, indent=4)
+    
+    return metrics
+
 def main():
     try:
         # Setup logging
@@ -161,7 +373,7 @@ def main():
         
         # Load and preprocess data
         logging.info("Loading and preprocessing data...")
-        pseudobulk_tokens, celltype_tokens, pseudobulk_indices, celltype_indices, labels, label_encoder = load_and_preprocess_data(
+        pseudobulk_indices, celltype_indices, labels, label_encoder, num_pseudobulk_chunks, num_celltype_chunks = load_and_preprocess_data(
             "data/processed_pseudobulk_expression_W.csv",
             "data/celltype_specific_2d_matrix.csv",
             config,
@@ -170,7 +382,7 @@ def main():
         
         # Training configuration
         batch_size = 1  # Keep batch size at 1
-        grad_accum_steps = 16  # Increase gradient accumulation steps to 16
+        grad_accum_steps = 32  # Increase gradient accumulation steps
         num_epochs = 50
         learning_rate = 1e-4
         checkpoint_frequency = 5
@@ -207,67 +419,125 @@ def main():
             epoch_loss = 0
             num_batches = 0
             
-            # Process data in batches
-            for i in range(0, len(pseudobulk_tokens), batch_size):
-                batch_end = min(i + batch_size, len(pseudobulk_tokens))
-                pseudobulk_batch = pseudobulk_tokens[i:batch_end]
-                celltype_batch = celltype_tokens[i:batch_end]
+            # Process data in chunks
+            for chunk_idx in range(num_pseudobulk_chunks):
+                # Calculate number of batches in this chunk
+                chunk = np.load(f'data/chunks/pseudobulk/chunk_{chunk_idx}.npy')
+                num_batches_in_chunk = (len(chunk) + batch_size - 1) // batch_size
+                del chunk
+                gc.collect()
+                jax.clear_caches()
                 
-                rng_key = jax.random.PRNGKey(epoch * 1000 + i)
-                parameters, opt_state, batch_loss = train_step(
-                    parameters,
-                    opt_state,
-                    pseudobulk_batch,
-                    celltype_batch,
-                    forward_fn,
-                    optimizer,
-                    rng_key,
-                    grad_accum_steps
-                )
-                
-                epoch_loss += batch_loss
-                num_batches += 1
-                
-                # Clear memory after each batch
-                if i % 2 == 0:  # More frequent cleanup
+                # Process each batch in the chunk
+                for batch_idx in range(num_batches_in_chunk):
+                    # Load batch from pseudobulk chunk
+                    pseudobulk_batch = process_batch_from_chunks(
+                        chunk_idx, batch_idx, batch_size,
+                        'data/chunks/pseudobulk'
+                    )
+                    
+                    # Load corresponding batch from celltype chunk
+                    celltype_batch = process_batch_from_chunks(
+                        chunk_idx, batch_idx, batch_size,
+                        'data/chunks/celltype'
+                    )
+                    
+                    rng_key = jax.random.PRNGKey(epoch * 1000 + chunk_idx * 100 + batch_idx)
+                    parameters, opt_state, batch_loss = train_step(
+                        parameters,
+                        opt_state,
+                        pseudobulk_batch,
+                        celltype_batch,
+                        forward_fn,
+                        optimizer,
+                        rng_key,
+                        grad_accum_steps
+                    )
+                    
+                    epoch_loss += batch_loss
+                    num_batches += 1
+                    
+                    # Clear memory after each batch
+                    del pseudobulk_batch
+                    del celltype_batch
                     gc.collect()
                     jax.clear_caches()
-                    jax.clear_backends()
             
             # Compute average loss
             avg_loss = epoch_loss / num_batches
             
-            # Compute embeddings for evaluation
+            # Compute embeddings for evaluation in chunks
             logging.info("Computing embeddings for evaluation...")
-            pseudobulk_embeddings = []
-            celltype_embeddings = []
+            os.makedirs(f'data/embeddings/epoch_{epoch}', exist_ok=True)
             
-            # Process pseudobulk data in batches
-            for i in range(0, len(pseudobulk_tokens), batch_size):
-                batch_end = min(i + batch_size, len(pseudobulk_tokens))
-                batch = pseudobulk_tokens[i:batch_end]
-                batch_embeddings = process_batch(batch, parameters, forward_fn, jax.random.PRNGKey(0))
-                pseudobulk_embeddings.append(batch_embeddings)
-                del batch
-                del batch_embeddings
+            # Process pseudobulk data in chunks
+            for chunk_idx in range(num_pseudobulk_chunks):
+                chunk = np.load(f'data/chunks/pseudobulk/chunk_{chunk_idx}.npy')
+                num_batches_in_chunk = (len(chunk) + batch_size - 1) // batch_size
+                
+                # Process each batch in the chunk
+                chunk_embeddings = []
+                for batch_idx in range(num_batches_in_chunk):
+                    batch = process_batch_from_chunks(
+                        chunk_idx, batch_idx, batch_size,
+                        'data/chunks/pseudobulk'
+                    )
+                    batch_embeddings = process_batch(batch, parameters, forward_fn, jax.random.PRNGKey(0))
+                    chunk_embeddings.append(batch_embeddings)
+                    del batch
+                    del batch_embeddings
+                    gc.collect()
+                    jax.clear_caches()
+                
+                # Save chunk embeddings using memory-mapped array
+                chunk_embeddings = np.vstack(chunk_embeddings)
+                save_embeddings_memmap(
+                    f'data/embeddings/epoch_{epoch}',
+                    f'data/embeddings/epoch_{epoch}/pseudobulk_chunk_{chunk_idx}.npy',
+                    chunk_embeddings.shape
+                )
+                del chunk
+                del chunk_embeddings
                 gc.collect()
+                jax.clear_caches()
             
-            # Process celltype data in batches
-            for i in range(0, len(celltype_tokens), batch_size):
-                batch_end = min(i + batch_size, len(celltype_tokens))
-                batch = celltype_tokens[i:batch_end]
-                batch_embeddings = process_batch(batch, parameters, forward_fn, jax.random.PRNGKey(0))
-                celltype_embeddings.append(batch_embeddings)
-                del batch
-                del batch_embeddings
+            # Process celltype data in chunks
+            for chunk_idx in range(num_celltype_chunks):
+                chunk = np.load(f'data/chunks/celltype/chunk_{chunk_idx}.npy')
+                num_batches_in_chunk = (len(chunk) + batch_size - 1) // batch_size
+                
+                # Process each batch in the chunk
+                chunk_embeddings = []
+                for batch_idx in range(num_batches_in_chunk):
+                    batch = process_batch_from_chunks(
+                        chunk_idx, batch_idx, batch_size,
+                        'data/chunks/celltype'
+                    )
+                    batch_embeddings = process_batch(batch, parameters, forward_fn, jax.random.PRNGKey(0))
+                    chunk_embeddings.append(batch_embeddings)
+                    del batch
+                    del batch_embeddings
+                    gc.collect()
+                    jax.clear_caches()
+                
+                # Save chunk embeddings using memory-mapped array
+                chunk_embeddings = np.vstack(chunk_embeddings)
+                save_embeddings_memmap(
+                    f'data/embeddings/epoch_{epoch}',
+                    f'data/embeddings/epoch_{epoch}/celltype_chunk_{chunk_idx}.npy',
+                    chunk_embeddings.shape
+                )
+                del chunk
+                del chunk_embeddings
                 gc.collect()
+                jax.clear_caches()
             
-            # Combine embeddings
-            pseudobulk_embeddings = np.vstack(pseudobulk_embeddings)
-            celltype_embeddings = np.vstack(celltype_embeddings)
-            
-            # Compute metrics
-            metrics = compute_similarity_metrics(pseudobulk_embeddings, celltype_embeddings, labels)
+            # Compute metrics in a streaming way
+            metrics = compute_metrics_streaming(
+                f'data/embeddings/epoch_{epoch}',
+                num_pseudobulk_chunks,
+                labels
+            )
             
             # Early stopping check
             if avg_loss < (best_loss - early_stopping_min_delta):
@@ -325,21 +595,53 @@ def main():
         
         # Final evaluation
         logging.info("Performing final evaluation...")
-        final_metrics = evaluate_model(
-            pseudobulk_embeddings,
-            celltype_embeddings,
+        final_metrics = evaluate_model_streaming(
+            f'data/embeddings/epoch_{epoch}',
+            num_pseudobulk_chunks,
             labels,
             output_dir='final_evaluation'
         )
         
-        # Save final embeddings
-        logging.info("Saving final embeddings...")
-        np.save('data/trained_pseudobulk_embeddings.npy', pseudobulk_embeddings)
-        np.save('data/trained_celltype_embeddings.npy', celltype_embeddings)
+        # Get embedding dimension from first chunk
+        first_chunk = np.load(glob.glob(f'data/embeddings/epoch_{epoch}/pseudobulk_chunk_*.npy')[0])
+        embedding_dim = first_chunk.shape[1]
+        del first_chunk
+        gc.collect()
         
-        # Save as CSV with indices
-        pd.DataFrame(pseudobulk_embeddings, index=pseudobulk_indices).to_csv('data/trained_pseudobulk_embeddings.csv')
-        pd.DataFrame(celltype_embeddings, index=celltype_indices).to_csv('data/trained_celltype_embeddings.csv')
+        # Save final embeddings using memory-mapped arrays
+        logging.info("Saving final embeddings...")
+        save_embeddings_memmap(
+            f'data/embeddings/epoch_{epoch}',
+            'data/trained_pseudobulk_embeddings.npy',
+            (len(pseudobulk_indices), embedding_dim)
+        )
+        save_embeddings_memmap(
+            f'data/embeddings/epoch_{epoch}',
+            'data/trained_celltype_embeddings.npy',
+            (len(celltype_indices), embedding_dim)
+        )
+        
+        # Save as CSV with indices (in chunks)
+        chunk_size = 1000
+        for i in range(0, len(pseudobulk_indices), chunk_size):
+            chunk_end = min(i + chunk_size, len(pseudobulk_indices))
+            chunk_embeddings = np.load(f'data/embeddings/epoch_{epoch}/pseudobulk_chunk_{i//chunk_size}.npy')
+            pd.DataFrame(
+                chunk_embeddings,
+                index=pseudobulk_indices[i:chunk_end]
+            ).to_csv(f'data/trained_pseudobulk_embeddings_{i//chunk_size}.csv')
+            del chunk_embeddings
+            gc.collect()
+        
+        for i in range(0, len(celltype_indices), chunk_size):
+            chunk_end = min(i + chunk_size, len(celltype_indices))
+            chunk_embeddings = np.load(f'data/embeddings/epoch_{epoch}/celltype_chunk_{i//chunk_size}.npy')
+            pd.DataFrame(
+                chunk_embeddings,
+                index=celltype_indices[i:chunk_end]
+            ).to_csv(f'data/trained_celltype_embeddings_{i//chunk_size}.csv')
+            del chunk_embeddings
+            gc.collect()
         
         logging.info("Training completed successfully!")
         
