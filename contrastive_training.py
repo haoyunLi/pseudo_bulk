@@ -24,9 +24,13 @@ logging.basicConfig(
 
 # Configure JAX for GPU
 jax.config.update('jax_platform_name', 'cuda')  # Changed to explicitly use CUDA
-jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
+jax.config.update('jax_default_matmul_precision', jax.lax.Precision.DEFAULT)  # Use default precision
 jax.config.update('jax_enable_x64', False)
 jax.config.update('jax_disable_jit', False)
+jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
+jax.config.update('jax_enable_custom_prng', True)  # Enable custom PRNG
+jax.config.update('jax_enable_mlir', True)  # Enable MLIR for better optimizations
+jax.config.update('jax_enable_memories', True)  # Enable memory optimizations
 
 
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
@@ -321,8 +325,14 @@ def main():
             model_name="bulk_rna_bert_gtex_encode",
             embeddings_layers_to_save=(4,),
             checkpoint_directory="multiomics-open-research/checkpoints/",
+            compute_dtype=jnp.float16,  # Use FP16 for computations
+            param_dtype=jnp.float32,    # Keep parameters in FP32
+            output_dtype=jnp.float32    # Keep outputs in FP32
         )
         forward_fn = hk.transform(forward_fn)
+
+        # Enable gradient checkpointing
+        config.use_gradient_checkpointing = True
         
         # Training parameters
         batch_size = 1
