@@ -22,16 +22,19 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# Configure JAX for GPU
-jax.config.update('jax_platform_name', 'cuda')  # Changed to explicitly use CUDA
-jax.config.update('jax_default_matmul_precision', jax.lax.Precision.DEFAULT)  # Use default precision
+# Configure JAX for distributed training
+os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=2'  # Force JAX to see both GPUs
+jax.config.update('jax_platform_name', 'cuda')
+jax.config.update('jax_default_matmul_precision', jax.lax.Precision.DEFAULT)
 jax.config.update('jax_enable_x64', False)
 jax.config.update('jax_disable_jit', False)
-jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
-jax.config.update('jax_enable_custom_prng', True)  # Enable custom PRNG
-jax.config.update('jax_enable_mlir', True)  # Enable MLIR for better optimizations
-jax.config.update('jax_enable_memories', True)  # Enable memory optimizations
+jax.config.update('jax_threefry_partitionable', True)
+jax.config.update('jax_enable_custom_prng', True)
 
+
+# Initialize distributed training
+devices = jax.devices()
+print(f"Available devices: {devices}")
 
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     """Load and preprocess both pseudobulk and celltype-specific data."""
@@ -92,7 +95,7 @@ def clear_memory():
         gc.collect()
 
 def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key):
-    """Perform a single training step."""
+    """Perform a single training step with distributed processing."""
     def loss_fn(params):
         return compute_contrastive_loss(
             pseudobulk_batch,
@@ -110,6 +113,14 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
     params = optax.apply_updates(params, updates)
     
     return params, opt_state, loss
+
+# Create a pmap-compiled version of the training step
+train_step_pmap = jax.pmap(
+    train_step,
+    axis_name='batch',
+    in_axes=(None, None, 0, 0, None, None, None),
+    out_axes=(None, None, 0)
+)
 
 def load_part_data(part_num, is_randomized=False):
     """Load a specific part of the data."""
@@ -134,7 +145,7 @@ def load_part_data(part_num, is_randomized=False):
     return pseudobulk_df, celltype_df, labels, label_encoder
 
 def train_part(params, opt_state, pseudobulk_tokens, celltype_tokens, forward_fn, optimizer, rng_key, batch_size=1, patience=5, min_delta=0.001):
-    """Train on a single part of the data with early stopping."""
+    """Train on a single part of the data with early stopping and distributed processing."""
     epoch_loss = 0
     num_batches = 0
     
@@ -155,45 +166,28 @@ def train_part(params, opt_state, pseudobulk_tokens, celltype_tokens, forward_fn
         num_grad_steps = 0
         
         # Number of gradient accumulation steps
-        grad_accum_steps = 4  # Accumulate gradients over 4 steps
+        grad_accum_steps = 4
         
         # Process the full sequence but accumulate gradients
         for step in range(grad_accum_steps):
-            # Compute loss and gradients
-            loss, grads = jax.value_and_grad(lambda p: compute_contrastive_loss(
+            # Compute loss and gradients using distributed processing
+            params, opt_state, loss = train_step_pmap(
+                params, opt_state,
                 pseudobulk_batch,
                 celltype_batch,
-                forward_fn,
-                p,
-                rng_key
-            ))(params)
+                forward_fn, optimizer, rng_key
+            )
             
-            # Scale gradients by the number of accumulation steps
-            grads = jax.tree_map(lambda x: x / grad_accum_steps, grads)
-            
-            # Accumulate gradients
-            if accumulated_grads is None:
-                accumulated_grads = grads
-            else:
-                accumulated_grads = jax.tree_map(lambda x, y: x + y, accumulated_grads, grads)
-            
-            accumulated_loss += loss
+            accumulated_loss += jax.numpy.mean(loss)  # Average loss across devices
             num_grad_steps += 1
             
             # Clear memory after each accumulation step
-            del grads
             clear_memory()
-        
-        # Update parameters with accumulated gradients
-        updates, opt_state = optimizer.update(accumulated_grads, opt_state)
-        params = optax.apply_updates(params, updates)
         
         epoch_loss += accumulated_loss / num_grad_steps
         num_batches += 1
         
         # Clear memory after each batch
-        del accumulated_grads
-        del updates
         clear_memory()
     
     avg_loss = epoch_loss / num_batches
@@ -325,9 +319,9 @@ def main():
             model_name="bulk_rna_bert_gtex_encode",
             embeddings_layers_to_save=(4,),
             checkpoint_directory="multiomics-open-research/checkpoints/",
-            compute_dtype=jnp.float16,  # Use FP16 for computations
-            param_dtype=jnp.float32,    # Keep parameters in FP32
-            output_dtype=jnp.float32    # Keep outputs in FP32
+            compute_dtype=jnp.bfloat16,  # Use bfloat16 for computations (more stable than float16)
+            param_dtype=jnp.float32,     # Keep parameters in float32
+            output_dtype=jnp.float32     # Keep outputs in float32
         )
         forward_fn = hk.transform(forward_fn)
 
