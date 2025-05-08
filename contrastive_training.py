@@ -78,6 +78,15 @@ def create_batches(tokens, batch_size):
     for i in range(0, num_samples, batch_size):
         yield tokens[i:i + batch_size]
 
+def clear_memory():
+    """Aggressive memory clearing function."""
+    # Clear JAX caches
+    jax.clear_caches()
+    
+    # Clear Python garbage collector multiple times
+    for _ in range(3):
+        gc.collect()
+
 def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key):
     """Perform a single training step."""
     def loss_fn(params):
@@ -153,8 +162,13 @@ def train_part(params, opt_state, pseudobulk_tokens, celltype_tokens, forward_fn
         num_batches += 1
         
         # Clear memory after each batch
-        gc.collect()
-        jax.clear_caches()
+        clear_memory()
+        
+        # Delete batch data
+        del pseudobulk_batch
+        del celltype_batch
+        del grads
+        del updates
     
     avg_loss = epoch_loss / num_batches
     
@@ -165,6 +179,9 @@ def train_part(params, opt_state, pseudobulk_tokens, celltype_tokens, forward_fn
         no_improvement_count = 0
     else:
         no_improvement_count += 1
+    
+    # Clear memory after epoch
+    clear_memory()
     
     return params, opt_state, avg_loss, best_params, no_improvement_count
 
@@ -206,6 +223,13 @@ def train_phase(parameters, forward_fn, tokenizer, config, phase_num, learning_r
         # Tokenize the data
         pseudobulk_tokens = jnp.asarray(tokenizer.batch_tokenize(pseudobulk_array), dtype=jnp.int32)
         celltype_tokens = jnp.asarray(tokenizer.batch_tokenize(celltype_array), dtype=jnp.int32)
+        
+        # Clear memory after preprocessing
+        del pseudobulk_df
+        del celltype_df
+        del pseudobulk_array
+        del celltype_array
+        clear_memory()
         
         # Early stopping variables for this part
         best_params_part = parameters
@@ -253,10 +277,14 @@ def train_phase(parameters, forward_fn, tokenizer, config, phase_num, learning_r
                 history['early_stopped'][-1] = True
                 parameters = best_params_part  # Use best parameters
                 break
+            
+            # Clear memory after each epoch
+            clear_memory()
         
         # Clear memory after each part
-        gc.collect()
-        jax.clear_caches()
+        del pseudobulk_tokens
+        del celltype_tokens
+        clear_memory()
     
     return parameters, history
 
@@ -290,6 +318,9 @@ def main():
             is_randomized=False
         )
         
+        # Clear memory between phases
+        clear_memory()
+        
         # Save best model from phase 1
         checkpoint_path = "checkpoints/best_model_phase1.pkl"
         with open(checkpoint_path, 'wb') as f:
@@ -305,6 +336,9 @@ def main():
             batch_size=batch_size,
             is_randomized=True
         )
+        
+        # Clear memory before saving final model
+        clear_memory()
         
         # Save final model
         checkpoint_path = "checkpoints/final_model.pkl"
