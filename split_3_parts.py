@@ -22,27 +22,20 @@ def split_into_three_parts(input_file, output_prefix, random_state=42):
     part_size = total_samples // 3
     logging.info(f"Total samples: {total_samples}, Part size: {part_size}")
     
-    # Shuffle the data
-    np.random.seed(random_state)
-    shuffled_indices = np.random.permutation(total_samples)
-    
-    # Split into three parts
-    part1_indices = shuffled_indices[:part_size]
-    part2_indices = shuffled_indices[part_size:2*part_size]
-    part3_indices = shuffled_indices[2*part_size:]
+    # Split into three parts sequentially
+    part1_indices = np.arange(0, part_size)
+    part2_indices = np.arange(part_size, 2*part_size)
+    part3_indices = np.arange(2*part_size, total_samples)
     
     # Create the three parts
     part1_df = df.iloc[part1_indices]
     part2_df = df.iloc[part2_indices]
     part3_df = df.iloc[part3_indices]
     
-    # Create output directory if it doesn't exist
-    os.makedirs('data/split_three', exist_ok=True)
-    
     # Save the parts
-    part1_file = f'data/split_three/{output_prefix}_part1.csv'
-    part2_file = f'data/split_three/{output_prefix}_part2.csv'
-    part3_file = f'data/split_three/{output_prefix}_part3.csv'
+    part1_file = f'data/{output_prefix}_part1.csv'
+    part2_file = f'data/{output_prefix}_part2.csv'
+    part3_file = f'data/{output_prefix}_part3.csv'
     
     part1_df.to_csv(part1_file)
     part2_df.to_csv(part2_file)
