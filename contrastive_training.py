@@ -114,36 +114,6 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
     
     return params, opt_state, loss
 
-# Create a pmap-compiled version of the training step
-train_step_pmap = jax.pmap(
-    train_step,
-    axis_name='batch',
-    in_axes=(None, None, 0, 0, None, None, None),
-    out_axes=(None, None, 0)
-)
-
-def load_part_data(part_num, is_randomized=False):
-    """Load a specific part of the data."""
-    prefix = "pseudobulk_randomized" if is_randomized else "pseudobulk"
-    pseudobulk_path = f"data/{prefix}_part{part_num}.csv"
-    celltype_path = f"data/celltype_part{part_num}.csv"
-    
-    # Load data
-    pseudobulk_df = pd.read_csv(pseudobulk_path, index_col=0)
-    celltype_df = pd.read_csv(celltype_path, index_col=0)
-    
-    # Extract labels
-    labels = []
-    for idx in celltype_df.index:
-        label = idx.split('|')[0]
-        labels.append(label)
-    
-    # Convert labels to numeric
-    label_encoder = LabelEncoder()
-    labels = label_encoder.fit_transform(labels)
-    
-    return pseudobulk_df, celltype_df, labels, label_encoder
-
 def train_part(params, opt_state, pseudobulk_tokens, celltype_tokens, forward_fn, optimizer, rng_key, batch_size=1, patience=5, min_delta=0.001):
     """Train on a single part of the data with early stopping and distributed processing."""
     epoch_loss = 0
@@ -170,11 +140,24 @@ def train_part(params, opt_state, pseudobulk_tokens, celltype_tokens, forward_fn
         
         # Process the full sequence but accumulate gradients
         for step in range(grad_accum_steps):
+            # Split batch across devices
+            num_devices = len(devices)
+            batch_size_per_device = pseudobulk_batch.shape[0] // num_devices
+            
+            # Reshape batches for parallel processing
+            pseudobulk_batch_reshaped = pseudobulk_batch.reshape(num_devices, batch_size_per_device, -1)
+            celltype_batch_reshaped = celltype_batch.reshape(num_devices, batch_size_per_device, -1)
+            
             # Compute loss and gradients using distributed processing
-            params, opt_state, loss = train_step_pmap(
+            params, opt_state, loss = jax.pmap(
+                train_step,
+                axis_name='batch',
+                in_axes=(None, None, 0, 0, None, None, None),
+                out_axes=(None, None, 0)
+            )(
                 params, opt_state,
-                pseudobulk_batch,
-                celltype_batch,
+                pseudobulk_batch_reshaped,
+                celltype_batch_reshaped,
                 forward_fn, optimizer, rng_key
             )
             
