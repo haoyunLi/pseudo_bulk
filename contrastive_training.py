@@ -24,7 +24,7 @@ logging.basicConfig(
 
 # Configure JAX for memory efficiency
 jax.config.update('jax_platform_name', 'gpu')
-jax.config.update('jax_default_matmul_precision', jax.lax.Precision.DEFAULT)
+jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
 jax.config.update('jax_enable_x64', False)
 jax.config.update('jax_disable_jit', False)
 
@@ -122,9 +122,7 @@ def main():
         )
         
         # Training parameters
-        batch_size = 32  # Increased from 1 to process more samples efficiently
-        gradient_accumulation_steps = 4  # Accumulate gradients over 4 steps
-        effective_batch_size = batch_size * gradient_accumulation_steps
+        batch_size = 1  # Keep batch size at 1 to minimize memory usage
         num_epochs = 50
         learning_rate = 1e-4
         patience = 5
@@ -132,7 +130,7 @@ def main():
         
         # Initialize optimizer with gradient clipping
         optimizer = optax.chain(
-            optax.clip_by_global_norm(1.0),  # Add gradient clipping
+            optax.clip_by_global_norm(1.0),
             optax.adam(learning_rate)
         )
         opt_state = optimizer.init(parameters)
@@ -156,13 +154,12 @@ def main():
         for epoch in range(num_epochs):
             epoch_loss = 0
             num_batches = 0
-            accumulated_grads = None
             
             # Create batches
             pseudobulk_batches = create_batches(pseudobulk_tokens, batch_size)
             celltype_batches = create_batches(celltype_tokens, batch_size)
             
-            # Process batches with gradient accumulation
+            # Process batches
             for i, (pseudobulk_batch, celltype_batch) in enumerate(tqdm(zip(pseudobulk_batches, celltype_batches), 
                                                        desc=f"Epoch {epoch + 1}/{num_epochs}")):
                 rng_key = jax.random.PRNGKey(epoch * 1000 + i)
@@ -176,36 +173,20 @@ def main():
                     rng_key
                 ))(parameters)
                 
-                # Accumulate gradients
-                if accumulated_grads is None:
-                    accumulated_grads = grads
-                else:
-                    accumulated_grads = jax.tree_map(lambda x, y: x + y, accumulated_grads, grads)
+                # Update parameters
+                updates, opt_state = optimizer.update(grads, opt_state)
+                parameters = optax.apply_updates(parameters, updates)
                 
                 epoch_loss += loss
                 num_batches += 1
                 
-                # Update parameters after accumulation steps
-                if (i + 1) % gradient_accumulation_steps == 0:
-                    # Average accumulated gradients
-                    accumulated_grads = jax.tree_map(lambda x: x / gradient_accumulation_steps, accumulated_grads)
-                    
-                    # Update parameters
-                    updates, opt_state = optimizer.update(accumulated_grads, opt_state)
-                    parameters = optax.apply_updates(parameters, updates)
-                    
-                    # Reset accumulated gradients
-                    accumulated_grads = None
-                    
-                    # Clear memory
-                    gc.collect()
-                    jax.clear_caches()
-            
-            # Handle remaining gradients if any
-            if accumulated_grads is not None:
-                accumulated_grads = jax.tree_map(lambda x: x / (num_batches % gradient_accumulation_steps), accumulated_grads)
-                updates, opt_state = optimizer.update(accumulated_grads, opt_state)
-                parameters = optax.apply_updates(parameters, updates)
+                # Clear memory after each batch
+                gc.collect()
+                jax.clear_caches()
+                
+                # Log memory usage every 100 batches
+                if i % 100 == 0:
+                    logging.info(f"Processed {i} batches in epoch {epoch + 1}")
             
             # Compute average loss
             avg_loss = epoch_loss / num_batches
