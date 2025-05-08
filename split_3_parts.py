@@ -51,17 +51,17 @@ def main():
     # Split pseudobulk data
     logging.info("Splitting pseudobulk data...")
     split_into_three_parts(
-        'data/train_pseudobulk_sorted.csv',
-        'pseudobulk'
+        'data/train_pseudobulk_randomized.csv',
+        'pseudobulk_randomized'
     )
-    
+    """
     # Split celltype specific data
     logging.info("Splitting celltype specific data...")
     split_into_three_parts(
         'data/celltype_specific_2d_matrix_sorted.csv',
         'celltype'
     )
-    
+    """
     logging.info("All data has been split into three parts successfully!")
 
 if __name__ == "__main__":
