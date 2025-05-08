@@ -19,14 +19,14 @@ def sort_data_by_donor(input_file, output_file):
     # Read the CSV file
     df = pd.read_csv(input_file, index_col=0)
     
-    # Extract donor IDs and create a temporary column for sorting
-    df['donor_id'] = df.index.map(extract_donor_id)
+    # Extract donor IDs and create a temporary column for sorting with a unique name
+    df['_temp_donor_id'] = df.index.map(extract_donor_id)
     
     # Sort by donor ID
-    df_sorted = df.sort_values('donor_id')
+    df_sorted = df.sort_values('_temp_donor_id')
     
     # Remove the temporary column
-    df_sorted = df_sorted.drop('donor_id', axis=1)
+    df_sorted = df_sorted.drop('_temp_donor_id', axis=1)
     
     # Save the sorted data
     df_sorted.to_csv(output_file)
