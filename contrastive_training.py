@@ -145,30 +145,61 @@ def train_part(params, opt_state, pseudobulk_tokens, celltype_tokens, forward_fn
     
     # Process batches
     for i, (pseudobulk_batch, celltype_batch) in enumerate(zip(pseudobulk_batches, celltype_batches)):
-        # Compute loss and gradients
-        loss, grads = jax.value_and_grad(lambda p: compute_contrastive_loss(
-            pseudobulk_batch,
-            celltype_batch,
-            forward_fn,
-            p,
-            rng_key
-        ))(params)
+        # Initialize accumulated gradients
+        accumulated_grads = None
+        accumulated_loss = 0
+        num_grad_steps = 0
+        
+        # Process in smaller chunks of genes
+        chunk_size = 5000  # Process 5000 genes at a time
+        num_genes = pseudobulk_batch.shape[1]
+        
+        for start_idx in range(0, num_genes, chunk_size):
+            end_idx = min(start_idx + chunk_size, num_genes)
+            
+            # Extract gene chunks
+            pseudobulk_chunk = pseudobulk_batch[:, start_idx:end_idx]
+            celltype_chunk = celltype_batch[:, start_idx:end_idx]
+            
+            # Compute loss and gradients for this chunk
+            loss, grads = jax.value_and_grad(lambda p: compute_contrastive_loss(
+                pseudobulk_chunk,
+                celltype_chunk,
+                forward_fn,
+                p,
+                rng_key
+            ))(params)
+            
+            # Accumulate gradients
+            if accumulated_grads is None:
+                accumulated_grads = grads
+            else:
+                accumulated_grads = jax.tree_map(lambda x, y: x + y, accumulated_grads, grads)
+            
+            accumulated_loss += loss
+            num_grad_steps += 1
+            
+            # Clear memory after each chunk
+            del pseudobulk_chunk
+            del celltype_chunk
+            del grads
+            clear_memory()
+        
+        # Average the accumulated gradients
+        accumulated_grads = jax.tree_map(lambda x: x / num_grad_steps, accumulated_grads)
+        avg_loss = accumulated_loss / num_grad_steps
         
         # Update parameters
-        updates, opt_state = optimizer.update(grads, opt_state)
+        updates, opt_state = optimizer.update(accumulated_grads, opt_state)
         params = optax.apply_updates(params, updates)
         
-        epoch_loss += loss
+        epoch_loss += avg_loss
         num_batches += 1
         
         # Clear memory after each batch
-        clear_memory()
-        
-        # Delete batch data
-        del pseudobulk_batch
-        del celltype_batch
-        del grads
+        del accumulated_grads
         del updates
+        clear_memory()
     
     avg_loss = epoch_loss / num_batches
     
