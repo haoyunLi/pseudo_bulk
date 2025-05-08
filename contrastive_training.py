@@ -26,6 +26,8 @@ logging.basicConfig(
 jax.config.update('jax_platform_name', 'gpu')
 jax.config.update('jax_default_matmul_precision', jax.lax.Precision.DEFAULT)
 jax.config.update('jax_enable_x64', False)
+jax.config.update('jax_disable_jit', False)
+
 
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     """Load and preprocess both pseudobulk and celltype-specific data."""
@@ -120,14 +122,19 @@ def main():
         )
         
         # Training parameters
-        batch_size = 1
+        batch_size = 32  # Increased from 1 to process more samples efficiently
+        gradient_accumulation_steps = 4  # Accumulate gradients over 4 steps
+        effective_batch_size = batch_size * gradient_accumulation_steps
         num_epochs = 50
         learning_rate = 1e-4
-        patience = 5  # Number of epochs to wait for improvement
-        min_delta = 0.001  # Minimum change in metric to be considered as improvement
+        patience = 5
+        min_delta = 0.001
         
-        # Initialize optimizer
-        optimizer = optax.adam(learning_rate)
+        # Initialize optimizer with gradient clipping
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(1.0),  # Add gradient clipping
+            optax.adam(learning_rate)
+        )
         opt_state = optimizer.init(parameters)
         
         # Initialize training history
@@ -149,31 +156,56 @@ def main():
         for epoch in range(num_epochs):
             epoch_loss = 0
             num_batches = 0
+            accumulated_grads = None
             
             # Create batches
             pseudobulk_batches = create_batches(pseudobulk_tokens, batch_size)
             celltype_batches = create_batches(celltype_tokens, batch_size)
             
-            # Process batches
-            for pseudobulk_batch, celltype_batch in tqdm(zip(pseudobulk_batches, celltype_batches), 
-                                                       desc=f"Epoch {epoch + 1}/{num_epochs}"):
-                rng_key = jax.random.PRNGKey(epoch)
-                parameters, opt_state, batch_loss = train_step(
-                    parameters,
-                    opt_state,
+            # Process batches with gradient accumulation
+            for i, (pseudobulk_batch, celltype_batch) in enumerate(tqdm(zip(pseudobulk_batches, celltype_batches), 
+                                                       desc=f"Epoch {epoch + 1}/{num_epochs}")):
+                rng_key = jax.random.PRNGKey(epoch * 1000 + i)
+                
+                # Compute loss and gradients
+                loss, grads = jax.value_and_grad(lambda p: compute_contrastive_loss(
                     pseudobulk_batch,
                     celltype_batch,
                     forward_fn,
-                    optimizer,
+                    p,
                     rng_key
-                )
+                ))(parameters)
                 
-                epoch_loss += batch_loss
+                # Accumulate gradients
+                if accumulated_grads is None:
+                    accumulated_grads = grads
+                else:
+                    accumulated_grads = jax.tree_map(lambda x, y: x + y, accumulated_grads, grads)
+                
+                epoch_loss += loss
                 num_batches += 1
                 
-                # Clear memory
-                gc.collect()
-                jax.clear_caches()
+                # Update parameters after accumulation steps
+                if (i + 1) % gradient_accumulation_steps == 0:
+                    # Average accumulated gradients
+                    accumulated_grads = jax.tree_map(lambda x: x / gradient_accumulation_steps, accumulated_grads)
+                    
+                    # Update parameters
+                    updates, opt_state = optimizer.update(accumulated_grads, opt_state)
+                    parameters = optax.apply_updates(parameters, updates)
+                    
+                    # Reset accumulated gradients
+                    accumulated_grads = None
+                    
+                    # Clear memory
+                    gc.collect()
+                    jax.clear_caches()
+            
+            # Handle remaining gradients if any
+            if accumulated_grads is not None:
+                accumulated_grads = jax.tree_map(lambda x: x / (num_batches % gradient_accumulation_steps), accumulated_grads)
+                updates, opt_state = optimizer.update(accumulated_grads, opt_state)
+                parameters = optax.apply_updates(parameters, updates)
             
             # Compute average loss
             avg_loss = epoch_loss / num_batches
