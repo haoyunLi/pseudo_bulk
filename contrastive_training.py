@@ -45,8 +45,8 @@ def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     logging.info("Extracting labels from celltype data index...")
     labels = []
     for idx in celltype_df.index:
-        # The index format is "celltype_donorID", so we split on underscore
-        label = idx.split('_')[0]
+        # The index format is "celltype|donorID", so we split on pipe
+        label = idx.split('|')[0]
         labels.append(label)
     
     # Convert labels to numeric if they're categorical

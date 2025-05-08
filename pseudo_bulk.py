@@ -155,10 +155,10 @@ def save_expression_matrix(adata, output_filename):
     """
     print(f"Saving expression matrix to {output_filename}...")
     
-    # Convert X to a DataFrame with proper index
+    # Convert X to a DataFrame with donor_id as index
     expression_df = pd.DataFrame(
         adata.X.toarray() if hasattr(adata.X, "toarray") else adata.X,
-        index=adata.obs_names,  # Use the observation names as index
+        index=adata.obs['donor_id'],  # Use donor_id as index
         columns=adata.var_names  # gene names
     )
     
@@ -188,7 +188,8 @@ def create_weighted_pseudobulk(adata):
     """
     print("Creating weighted_pseudobulk data...")
     
-    donors = adata.obs['donor_id'].unique()
+    # Get unique donors in the original order they appear
+    donors = pd.Series(adata.obs['donor_id'].unique())
     donor_profiles = []
     donor_metadata = []
     celltype_matrices = {}
