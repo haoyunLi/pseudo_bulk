@@ -34,7 +34,7 @@ tokens_ids = tokenizer.batch_tokenize(rna_seq_array)
 tokens = jnp.asarray(tokens_ids, dtype=jnp.int32)
 
 # Process in very small batches to avoid memory issues
-batch_size = 2  # Reduced batch size
+batch_size = 1  # Reduced batch size
 num_samples = len(tokens)
 all_embeddings = []
 
