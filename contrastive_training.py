@@ -22,8 +22,8 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# Configure JAX for memory efficiency
-jax.config.update('jax_platform_name', 'gpu')
+# Configure JAX for GPU
+jax.config.update('jax_platform_name', 'cuda')  # Changed to explicitly use CUDA
 jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
 jax.config.update('jax_enable_x64', False)
 jax.config.update('jax_disable_jit', False)
@@ -150,25 +150,22 @@ def train_part(params, opt_state, pseudobulk_tokens, celltype_tokens, forward_fn
         accumulated_loss = 0
         num_grad_steps = 0
         
-        # Process in smaller chunks of genes
-        chunk_size = 5000  # Process 5000 genes at a time
-        num_genes = pseudobulk_batch.shape[1]
+        # Number of gradient accumulation steps
+        grad_accum_steps = 4  # Accumulate gradients over 4 steps
         
-        for start_idx in range(0, num_genes, chunk_size):
-            end_idx = min(start_idx + chunk_size, num_genes)
-            
-            # Extract gene chunks
-            pseudobulk_chunk = pseudobulk_batch[:, start_idx:end_idx]
-            celltype_chunk = celltype_batch[:, start_idx:end_idx]
-            
-            # Compute loss and gradients for this chunk
+        # Process the full sequence but accumulate gradients
+        for step in range(grad_accum_steps):
+            # Compute loss and gradients
             loss, grads = jax.value_and_grad(lambda p: compute_contrastive_loss(
-                pseudobulk_chunk,
-                celltype_chunk,
+                pseudobulk_batch,
+                celltype_batch,
                 forward_fn,
                 p,
                 rng_key
             ))(params)
+            
+            # Scale gradients by the number of accumulation steps
+            grads = jax.tree_map(lambda x: x / grad_accum_steps, grads)
             
             # Accumulate gradients
             if accumulated_grads is None:
@@ -179,21 +176,15 @@ def train_part(params, opt_state, pseudobulk_tokens, celltype_tokens, forward_fn
             accumulated_loss += loss
             num_grad_steps += 1
             
-            # Clear memory after each chunk
-            del pseudobulk_chunk
-            del celltype_chunk
+            # Clear memory after each accumulation step
             del grads
             clear_memory()
         
-        # Average the accumulated gradients
-        accumulated_grads = jax.tree_map(lambda x: x / num_grad_steps, accumulated_grads)
-        avg_loss = accumulated_loss / num_grad_steps
-        
-        # Update parameters
+        # Update parameters with accumulated gradients
         updates, opt_state = optimizer.update(accumulated_grads, opt_state)
         params = optax.apply_updates(params, updates)
         
-        epoch_loss += avg_loss
+        epoch_loss += accumulated_loss / num_grad_steps
         num_batches += 1
         
         # Clear memory after each batch
@@ -327,7 +318,7 @@ def main():
         # Get pretrained model
         logging.info("Loading pretrained model...")
         parameters, forward_fn, tokenizer, config = get_pretrained_model(
-            model_name="bulk_rna_bert_tcga",
+            model_name="bulk_rna_bert_gtex_encode",
             embeddings_layers_to_save=(4,),
             checkpoint_directory="multiomics-open-research/checkpoints/",
         )
