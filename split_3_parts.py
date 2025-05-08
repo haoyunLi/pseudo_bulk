@@ -58,14 +58,14 @@ def main():
     # Split pseudobulk data
     logging.info("Splitting pseudobulk data...")
     split_into_three_parts(
-        'data/processed_pseudobulk_expression_W.csv',
+        'data/train_pseudobulk_sorted.csv',
         'pseudobulk'
     )
     
     # Split celltype specific data
     logging.info("Splitting celltype specific data...")
     split_into_three_parts(
-        'data/celltype_specific_2d_matrix.csv',
+        'data/celltype_specific_2d_matrix_sorted.csv',
         'celltype'
     )
     

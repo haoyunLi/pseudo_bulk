@@ -41,8 +41,8 @@ def main():
     
     # Sort pseudobulk data
     sort_data_by_donor(
-        'data/processed_pseudobulk_expression_W.csv',
-        'data/processed_pseudobulk_expression_W_sorted.csv'
+        'data/train_pseudobulk.csv',
+        'data/train_pseudobulk_sorted.csv'
     )
     
     logging.info("All files have been sorted successfully!")
