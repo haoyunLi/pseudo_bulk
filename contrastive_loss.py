@@ -84,31 +84,36 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     pseudobulk_normalized = pseudobulk_embeddings / (pseudobulk_norm + eps)
     celltype_normalized = celltype_embeddings / (celltype_norm + eps)
     
-    # Compute similarity matrix [n_samples, n_celltypes]
+    # Compute similarity matrix [n_pseudobulk, n_celltypes]
     similarity_matrix = jnp.matmul(pseudobulk_normalized, celltype_normalized.T) / temperature
     logging.info(f"Similarity matrix shape: {similarity_matrix.shape}")
     
     # Create labels for each direction
     # For pseudobulk -> celltype: each pseudobulk sample should match with its corresponding celltypes
-    pseudobulk_labels = sample_indices
-    logging.info(f"Pseudobulk labels shape: {pseudobulk_labels.shape}")
+    # We need to create a matrix of shape [n_pseudobulk, n_celltypes] where each row has 1s for matching celltypes
+    pseudobulk_labels = jnp.zeros(similarity_matrix.shape)
+    for i, donor in enumerate(pseudobulk_donors):
+        matching_celltypes = jnp.array([extract_donor_id(d) == donor for d in celltype_donors])
+        pseudobulk_labels = pseudobulk_labels.at[i].set(matching_celltypes)
     
     # For celltype -> pseudobulk: each celltype should match with its corresponding sample
-    celltype_labels = jnp.arange(similarity_matrix.shape[0])
+    celltype_labels = sample_indices
+    
+    logging.info(f"Pseudobulk labels shape: {pseudobulk_labels.shape}")
     logging.info(f"Celltype labels shape: {celltype_labels.shape}")
     
     # Compute loss for both directions
     # For pseudobulk samples, find their best matching celltypes
-    loss_pseudobulk = sparse_categorical_crossentropy(pseudobulk_labels, similarity_matrix)
+    loss_pseudobulk = -jnp.sum(pseudobulk_labels * jax.nn.log_softmax(similarity_matrix, axis=1)) / pseudobulk_embeddings.shape[0]
     # For celltype samples, find their best matching pseudobulk
     loss_celltype = sparse_categorical_crossentropy(celltype_labels, similarity_matrix.T)
     
     # Log some statistics about the losses
-    logging.info(f"Mean pseudobulk loss: {float(loss_pseudobulk.mean()):.4f}")
+    logging.info(f"Mean pseudobulk loss: {float(loss_pseudobulk):.4f}")
     logging.info(f"Mean celltype loss: {float(loss_celltype.mean()):.4f}")
     
     # Return both losses separately
-    return loss_pseudobulk.mean(), loss_celltype.mean()
+    return loss_pseudobulk, loss_celltype.mean()
 
 def compute_gradients(loss_fn, params, pseudobulk_embeddings, celltype_embeddings):
     """
