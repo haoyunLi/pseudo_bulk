@@ -1,69 +1,96 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import logging
+import os
 
-def contrastive_loss(pseudobulk_embeddings, celltype_embeddings, temperature=0.07):
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, temperature=0.07):
     """
-    Compute contrastive loss between pseudobulk and celltype-specific embeddings using JAX
+    Compute contrastive loss between pseudobulk and celltype embeddings.
     
     Args:
-        pseudobulk_embeddings (jnp.ndarray): Embeddings from pseudobulk data
-        celltype_embeddings (jnp.ndarray): Embeddings from celltype-specific data
-        temperature (float): Temperature parameter for scaling the similarity scores
+        pseudobulk_embeddings: Embeddings from pseudobulk data [batch_size, embedding_dim]
+        celltype_embeddings: Embeddings from celltype-specific data [batch_size, embedding_dim]
+        temperature: Temperature parameter for softmax scaling
         
     Returns:
-        float: Contrastive loss value
+        Contrastive loss value
     """
     # Normalize embeddings
-    pseudobulk_embeddings = pseudobulk_embeddings / jnp.linalg.norm(pseudobulk_embeddings, axis=1, keepdims=True)
-    celltype_embeddings = celltype_embeddings / jnp.linalg.norm(celltype_embeddings, axis=1, keepdims=True)
+    pseudobulk_norm = jnp.linalg.norm(pseudobulk_embeddings, axis=1, keepdims=True)
+    celltype_norm = jnp.linalg.norm(celltype_embeddings, axis=1, keepdims=True)
+    
+    pseudobulk_normalized = pseudobulk_embeddings / pseudobulk_norm
+    celltype_normalized = celltype_embeddings / celltype_norm
     
     # Compute similarity matrix
-    similarity_matrix = jnp.matmul(pseudobulk_embeddings, celltype_embeddings.T) / temperature
+    similarity_matrix = jnp.matmul(pseudobulk_normalized, celltype_normalized.T) / temperature
     
-    # Create labels for positive pairs (diagonal elements)
+    # Create labels (diagonal elements are positive pairs)
     labels = jnp.arange(similarity_matrix.shape[0])
     
-    # Compute logits for cross entropy
-    logits_pseudobulk = similarity_matrix
-    logits_celltype = similarity_matrix.T
+    # Compute loss for both directions
+    loss_pseudobulk = jax.nn.sparse_categorical_crossentropy(
+        labels, similarity_matrix, from_logits=True
+    )
+    loss_celltype = jax.nn.sparse_categorical_crossentropy(
+        labels, similarity_matrix.T, from_logits=True
+    )
     
-    # Compute cross entropy loss for both directions
-    def cross_entropy(logits, labels):
-        log_probs = jax.nn.log_softmax(logits, axis=1)
-        return -jnp.mean(jnp.take_along_axis(log_probs, labels[:, None], axis=1))
-    
-    loss_pseudobulk = cross_entropy(logits_pseudobulk, labels)
-    loss_celltype = cross_entropy(logits_celltype, labels)
-    
-    # Total loss is the average of both directions
-    total_loss = (loss_pseudobulk + loss_celltype) / 2
+    # Average the losses
+    total_loss = (loss_pseudobulk.mean() + loss_celltype.mean()) / 2
     
     return total_loss
 
-def compute_contrastive_loss(pseudobulk_data, celltype_data, model_fn, params, rng_key):
+def compute_gradients(loss_fn, params, pseudobulk_embeddings, celltype_embeddings):
     """
-    Helper function to compute contrastive loss for a batch of data
+    Compute gradients of the contrastive loss with respect to the embeddings.
     
     Args:
-        pseudobulk_data (jnp.ndarray): Pseudobulk data batch
-        celltype_data (jnp.ndarray): Celltype-specific data batch
-        model_fn: Haiku transformed model function
+        loss_fn: Function that computes the contrastive loss
         params: Model parameters
-        rng_key: JAX random key
+        pseudobulk_embeddings: Embeddings from pseudobulk data
+        celltype_embeddings: Embeddings from celltype-specific data
         
     Returns:
-        float: Contrastive loss value
+        Gradients for both pseudobulk and celltype embeddings
     """
-    # Generate embeddings
-    pseudobulk_outs = model_fn.apply(params, rng_key, pseudobulk_data)
-    celltype_outs = model_fn.apply(params, rng_key, celltype_data)
+    grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 1))
+    (loss, (pseudobulk_grads, celltype_grads)) = grad_fn(
+        pseudobulk_embeddings, celltype_embeddings
+    )
+    return loss, pseudobulk_grads, celltype_grads
+
+def main():
+    # Create directory for losses
+    os.makedirs('losses', exist_ok=True)
     
-    # Get mean embeddings from layer 4
-    pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=1)
-    celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=1)
+    # Load embeddings
+    logging.info("Loading embeddings...")
+    pseudobulk_embeddings = np.load('data/mean_embeddings.npy')
+    celltype_embeddings = np.load('data/celltype_specific_embeddings.npy ')
+    
+    # Convert to JAX arrays
+    pseudobulk_embeddings = jnp.array(pseudobulk_embeddings)
+    celltype_embeddings = jnp.array(celltype_embeddings)
     
     # Compute loss
-    loss = contrastive_loss(pseudobulk_embeddings, celltype_embeddings)
+    logging.info("Computing contrastive loss...")
+    loss = compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings)
     
-    return loss
+    # Save loss
+    loss_file = 'losses/current_loss.txt'
+    with open(loss_file, 'w') as f:
+        f.write(str(float(loss)))
+    logging.info(f"Saved loss to {loss_file}")
+    logging.info(f"Current loss: {float(loss):.4f}")
+
+if __name__ == "__main__":
+    main()
