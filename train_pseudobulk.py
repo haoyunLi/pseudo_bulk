@@ -16,6 +16,13 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
+# Optimize JAX configuration for GPU
+jax.config.update('jax_platform_name', 'gpu')
+jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
+jax.config.update('jax_enable_x64', False)
+jax.config.update('jax_disable_jit', False)  # Enable JIT compilation
+jax.config.update('jax_threefry_partitionable', True)  # Enable better parallelization
+
 def load_data():
     """Load pseudobulk data."""
     return pd.read_csv("data/processed_pseudobulk_expression_W.csv", index_col=0)
@@ -43,9 +50,12 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key):
     outs = forward_fn.apply(params, rng_key, batch)
     embeddings = outs["embeddings_4"].mean(axis=1)
     
-    # Load current loss
-    with open('losses/current_loss.txt', 'r') as f:
-        loss = float(f.read().strip())
+    # Load current loss from current_losses.txt
+    with open('losses/current_losses.txt', 'r') as f:
+        for line in f:
+            if line.startswith('Pseudobulk loss:'):
+                loss = float(line.split(':')[1].strip())
+                break
     
     # Update parameters using the loss
     updates, opt_state = optimizer.update(loss, opt_state, params)
@@ -61,12 +71,9 @@ def main():
     # Get pretrained model
     logging.info("Loading pretrained model...")
     parameters, forward_fn, tokenizer, config = get_pretrained_model(
-        model_name="bulk_rna_bert_gtex_encode",
+        model_name="bulk_rna_bert_tcga",
         embeddings_layers_to_save=(4,),
         checkpoint_directory="multiomics-open-research/checkpoints/",
-        compute_dtype=jnp.bfloat16,
-        param_dtype=jnp.float32,
-        output_dtype=jnp.float32
     )
     forward_fn = hk.transform(forward_fn)
     
