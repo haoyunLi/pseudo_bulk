@@ -58,8 +58,17 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key):
                 break
     
     # Load gradients
-    grads = np.load('losses/pseudobulk_grads.npy')
-    grads = jnp.array(grads)
+    raw_grads = np.load('losses/pseudobulk_grads.npy')
+    
+    # Create a gradient structure matching the model parameters
+    grads = {}
+    for key in params.keys():
+        if key == 'embedding':
+            # For embedding layer, use the raw gradients
+            grads[key] = jnp.array(raw_grads)
+        else:
+            # For other layers, create zero gradients
+            grads[key] = jnp.zeros_like(params[key])
     
     # Update parameters using gradients
     updates, opt_state = optimizer.update(grads, opt_state, params)
