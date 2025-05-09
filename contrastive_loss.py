@@ -105,12 +105,44 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     
     celltype_loss = sparse_categorical_crossentropy(celltype_labels, similarity_matrix.T)
     
-    # Compute gradients
-    # For pseudobulk loss, we need to sum over the batch dimension
-    pseudobulk_grads = jax.grad(lambda x: -jnp.sum(pseudobulk_labels * jax.nn.log_softmax(x, axis=1)) / jnp.sum(positive_pairs))(similarity_matrix)
+    # Compute gradients for each batch
+    batch_size = 1  # Match training batch size
+    n_pseudobulk = pseudobulk_embeddings.shape[0]
+    n_celltypes = celltype_embeddings.shape[0]
     
-    # For celltype loss, we need to sum over the batch dimension to get a scalar
-    celltype_grads = jax.grad(lambda x: jnp.sum(sparse_categorical_crossentropy(celltype_labels, x)))(similarity_matrix.T)
+    # Initialize gradient arrays
+    pseudobulk_grads = np.zeros((n_pseudobulk, n_celltypes), dtype=np.float32)
+    celltype_grads = np.zeros((n_celltypes, n_pseudobulk), dtype=np.float32)
+    
+    # Compute gradients for each batch
+    for i in range(0, n_pseudobulk, batch_size):
+        # Get current batch
+        batch_end = min(i + batch_size, n_pseudobulk)
+        batch_similarity = similarity_matrix[i:batch_end]
+        batch_labels = pseudobulk_labels[i:batch_end]
+        batch_positive_pairs = positive_pairs[i:batch_end]
+        
+        # Compute pseudobulk gradients for this batch
+        batch_pseudobulk_grads = jax.grad(
+            lambda x: -jnp.sum(batch_labels * jax.nn.log_softmax(x, axis=1)) / jnp.sum(batch_positive_pairs)
+        )(batch_similarity)
+        
+        # Store in the full gradient array
+        pseudobulk_grads[i:batch_end] = np.array(batch_pseudobulk_grads)
+    
+    for i in range(0, n_celltypes, batch_size):
+        # Get current batch
+        batch_end = min(i + batch_size, n_celltypes)
+        batch_similarity = similarity_matrix.T[i:batch_end]
+        batch_labels = celltype_labels[i:batch_end]
+        
+        # Compute celltype gradients for this batch
+        batch_celltype_grads = jax.grad(
+            lambda x: jnp.sum(sparse_categorical_crossentropy(batch_labels, x))
+        )(batch_similarity)
+        
+        # Store in the full gradient array
+        celltype_grads[i:batch_end] = np.array(batch_celltype_grads)
     
     # Log gradient sizes
     logging.info(f"Pseudobulk gradients shape: {pseudobulk_grads.shape}")
@@ -130,8 +162,8 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
         f.write(f"Pseudobulk gradients shape: {pseudobulk_grads.shape}\n")
         f.write(f"Celltype gradients shape: {celltype_grads.shape}\n")
         # Save gradients as numpy arrays
-        np.save('losses/pseudobulk_grads.npy', np.array(pseudobulk_grads))
-        np.save('losses/celltype_grads.npy', np.array(celltype_grads))
+        np.save('losses/pseudobulk_grads.npy', pseudobulk_grads)
+        np.save('losses/celltype_grads.npy', celltype_grads)
     
     return pseudobulk_loss, celltype_loss.mean()
 
