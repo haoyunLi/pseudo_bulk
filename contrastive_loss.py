@@ -106,8 +106,11 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     celltype_loss = sparse_categorical_crossentropy(celltype_labels, similarity_matrix.T)
     
     # Compute gradients
+    # For pseudobulk loss, we need to sum over the batch dimension
     pseudobulk_grads = jax.grad(lambda x: -jnp.sum(pseudobulk_labels * jax.nn.log_softmax(x, axis=1)) / jnp.sum(positive_pairs))(similarity_matrix)
-    celltype_grads = jax.grad(lambda x: sparse_categorical_crossentropy(celltype_labels, x))(similarity_matrix.T)
+    
+    # For celltype loss, we need to sum over the batch dimension to get a scalar
+    celltype_grads = jax.grad(lambda x: jnp.sum(sparse_categorical_crossentropy(celltype_labels, x)))(similarity_matrix.T)
     
     # Log gradient sizes
     logging.info(f"Pseudobulk gradients shape: {pseudobulk_grads.shape}")
