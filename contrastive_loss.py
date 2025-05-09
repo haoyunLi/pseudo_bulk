@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import logging
 import os
+import pandas as pd
 
 # Configure logging
 logging.basicConfig(
@@ -132,20 +133,26 @@ def main():
     # Create directory for losses
     os.makedirs('losses', exist_ok=True)
     
-    # Load embeddings
-    logging.info("Loading embeddings...")
-    pseudobulk_data = np.load('data/mean_embeddings.npy', allow_pickle=True)
-    celltype_data = np.load('data/celltype_specific_embeddings.npy', allow_pickle=True)
+    # Load embeddings and donor IDs
+    logging.info("Loading embeddings and donor IDs...")
     
-    # Extract embeddings and donor IDs
-    pseudobulk_embeddings = pseudobulk_data['embeddings']
-    celltype_embeddings = celltype_data['embeddings']
-    pseudobulk_donors = pseudobulk_data['donor_ids']
-    celltype_donors = celltype_data['donor_ids']
+    # Load embeddings from NPY files
+    pseudobulk_embeddings = np.load('data/mean_embeddings.npy')
+    celltype_embeddings = np.load('data/celltype_specific_embeddings.npy')
+    
+    # Load donor IDs from CSV files
+    pseudobulk_df = pd.read_csv('data/mean_embeddings.csv', index_col=0)
+    celltype_df = pd.read_csv('data/celltype_specific_embeddings.csv', index_col=0)
+    
+    # Get donor IDs
+    pseudobulk_donors = pseudobulk_df.index.tolist()
+    celltype_donors = celltype_df.index.tolist()
     
     # Log shapes for debugging
     logging.info(f"Pseudobulk embeddings shape: {pseudobulk_embeddings.shape}")
     logging.info(f"Celltype embeddings shape: {celltype_embeddings.shape}")
+    logging.info(f"Number of pseudobulk samples: {len(pseudobulk_donors)}")
+    logging.info(f"Number of celltype samples: {len(celltype_donors)}")
     
     # Convert to JAX arrays
     pseudobulk_embeddings = jnp.array(pseudobulk_embeddings)
