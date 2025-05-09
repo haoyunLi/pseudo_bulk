@@ -89,33 +89,47 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     logging.info(f"Similarity matrix shape: {similarity_matrix.shape}")
     
     # Create labels for each direction
-    # For pseudobulk -> celltype: each pseudobulk sample should match with its corresponding celltypes
-    # We need to create a matrix of shape [n_pseudobulk, n_celltypes] where each row has 1s for matching celltypes
     pseudobulk_labels = jnp.zeros(similarity_matrix.shape)
     for i, donor in enumerate(pseudobulk_donors):
         matching_celltypes = jnp.array([extract_donor_id(d) == donor for d in celltype_donors])
         pseudobulk_labels = pseudobulk_labels.at[i].set(matching_celltypes)
     
-    # For celltype -> pseudobulk: each celltype should match with its corresponding sample
     celltype_labels = sample_indices
     
     logging.info(f"Pseudobulk labels shape: {pseudobulk_labels.shape}")
     logging.info(f"Celltype labels shape: {celltype_labels.shape}")
     
     # Compute loss for both directions
-    # For pseudobulk samples, find their best matching celltypes
-    # Normalize by the number of positive pairs per pseudobulk sample
     positive_pairs = jnp.sum(pseudobulk_labels, axis=1, keepdims=True)
     pseudobulk_loss = -jnp.sum(pseudobulk_labels * jax.nn.log_softmax(similarity_matrix, axis=1)) / jnp.sum(positive_pairs)
     
-    # For celltype samples, find their best matching pseudobulk
     celltype_loss = sparse_categorical_crossentropy(celltype_labels, similarity_matrix.T)
+    
+    # Compute gradients
+    pseudobulk_grads = jax.grad(lambda x: -jnp.sum(pseudobulk_labels * jax.nn.log_softmax(x, axis=1)) / jnp.sum(positive_pairs))(similarity_matrix)
+    celltype_grads = jax.grad(lambda x: sparse_categorical_crossentropy(celltype_labels, x))(similarity_matrix.T)
+    
+    # Log gradient sizes
+    logging.info(f"Pseudobulk gradients shape: {pseudobulk_grads.shape}")
+    logging.info(f"Celltype gradients shape: {celltype_grads.shape}")
+    logging.info(f"Pseudobulk gradients size in MB: {pseudobulk_grads.nbytes / (1024 * 1024):.2f}")
+    logging.info(f"Celltype gradients size in MB: {celltype_grads.nbytes / (1024 * 1024):.2f}")
     
     # Log some statistics about the losses
     logging.info(f"Mean pseudobulk loss: {float(pseudobulk_loss):.4f}")
     logging.info(f"Mean celltype loss: {float(celltype_loss.mean()):.4f}")
     
-    # Return both losses separately
+    # Save losses and gradients to file
+    os.makedirs('losses', exist_ok=True)
+    with open('losses/current_losses.txt', 'w') as f:
+        f.write(f"Pseudobulk loss: {float(pseudobulk_loss):.4f}\n")
+        f.write(f"Celltype loss: {float(celltype_loss.mean()):.4f}\n")
+        f.write(f"Pseudobulk gradients shape: {pseudobulk_grads.shape}\n")
+        f.write(f"Celltype gradients shape: {celltype_grads.shape}\n")
+        # Save gradients as numpy arrays
+        np.save('losses/pseudobulk_grads.npy', np.array(pseudobulk_grads))
+        np.save('losses/celltype_grads.npy', np.array(celltype_grads))
+    
     return pseudobulk_loss, celltype_loss.mean()
 
 def compute_gradients(loss_fn, params, pseudobulk_embeddings, celltype_embeddings):

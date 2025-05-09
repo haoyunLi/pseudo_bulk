@@ -50,15 +50,19 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key):
     outs = forward_fn.apply(params, rng_key, batch)
     embeddings = outs["embeddings_4"].mean(axis=1)
     
-    # Load current loss from current_losses.txt
+    # Load current loss and gradients from files
     with open('losses/current_losses.txt', 'r') as f:
         for line in f:
             if line.startswith('Pseudobulk loss:'):
                 loss = float(line.split(':')[1].strip())
                 break
     
-    # Update parameters using the loss
-    updates, opt_state = optimizer.update(loss, opt_state, params)
+    # Load gradients
+    grads = np.load('losses/pseudobulk_grads.npy')
+    grads = jnp.array(grads)
+    
+    # Update parameters using gradients
+    updates, opt_state = optimizer.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
     
     return params, opt_state, embeddings
