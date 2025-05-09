@@ -16,6 +16,9 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
+# Track the current round number
+ROUND = 1  # Change this number for each new run
+
 # Optimize JAX configuration for GPU
 jax.config.update('jax_platform_name', 'gpu')
 jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
@@ -58,14 +61,14 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key):
     embeddings = outs["embeddings_4"].mean(axis=1)
     
     # Load current loss and gradients from files
-    with open('losses/current_losses.txt', 'r') as f:
+    with open(f'losses/current_losses_round_{ROUND}.txt', 'r') as f:
         for line in f:
             if line.startswith('Pseudobulk loss:'):
                 loss = float(line.split(':')[1].strip())
                 break
     
     # Load gradients
-    raw_grads = np.load('losses/pseudobulk_grads.npy')
+    raw_grads = np.load(f'losses/pseudobulk_grads_round_{ROUND}.npy')
     
     # Create a gradient structure matching the model parameters
     grads = create_zero_grads(params)
@@ -95,10 +98,15 @@ def main():
     forward_fn = hk.transform(forward_fn)
     
     # Try to load previous parameters if they exist
-    checkpoint_file = 'checkpoints/pseudobulk_final.npy'
-    if os.path.exists(checkpoint_file):
-        logging.info(f"Loading previous parameters from {checkpoint_file}")
-        parameters = load_checkpoint(checkpoint_file)
+    current_checkpoint = f'checkpoints/pseudobulk_round_{ROUND}.npy'
+    previous_checkpoint = f'checkpoints/pseudobulk_round_{ROUND-1}.npy'
+    
+    if os.path.exists(current_checkpoint):
+        logging.info(f"Loading current round parameters from {current_checkpoint}")
+        parameters = load_checkpoint(current_checkpoint)
+    elif os.path.exists(previous_checkpoint):
+        logging.info(f"Loading previous round parameters from {previous_checkpoint}")
+        parameters = load_checkpoint(previous_checkpoint)
     else:
         logging.info("No previous parameters found, using initial parameters")
     
@@ -129,14 +137,14 @@ def main():
         )
         
         # Save embeddings
-        save_embeddings(embeddings, 'embeddings/pseudobulk_embeddings_1.npy')
+        save_embeddings(embeddings, f'embeddings/pseudobulk_embeddings_round_{ROUND}.npy')
         
         if (i // batch_size) % 10 == 0:
             logging.info(f"Processed batch {i//batch_size + 1}/{(len(pseudobulk_tokens) + batch_size - 1)//batch_size}")
     
     # Save final checkpoint
-    save_checkpoint(parameters, 'checkpoints/pseudobulk_final_1.npy')
-    logging.info("Training completed!")
+    save_checkpoint(parameters, f'checkpoints/pseudobulk_round_{ROUND}.npy')
+    logging.info(f"Training completed for round {ROUND}!")
 
 if __name__ == "__main__":
     main() 

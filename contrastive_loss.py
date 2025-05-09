@@ -12,6 +12,9 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
+# Track the current round number
+ROUND = 1  # Change this number for each new run
+
 def sparse_categorical_crossentropy(labels, logits):
     """
     Compute sparse categorical cross-entropy loss manually.
@@ -154,16 +157,17 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     logging.info(f"Mean pseudobulk loss: {float(pseudobulk_loss):.4f}")
     logging.info(f"Mean celltype loss: {float(celltype_loss.mean()):.4f}")
     
-    # Save losses and gradients to file
+    # Save losses and gradients to file with round number
     os.makedirs('losses', exist_ok=True)
-    with open('losses/current_losses.txt', 'w') as f:
+    with open(f'losses/current_losses_round_{ROUND}.txt', 'w') as f:
+        f.write(f"Round: {ROUND}\n")
         f.write(f"Pseudobulk loss: {float(pseudobulk_loss):.4f}\n")
         f.write(f"Celltype loss: {float(celltype_loss.mean()):.4f}\n")
         f.write(f"Pseudobulk gradients shape: {pseudobulk_grads.shape}\n")
         f.write(f"Celltype gradients shape: {celltype_grads.shape}\n")
-        # Save gradients as numpy arrays
-        np.save('losses/pseudobulk_grads.npy', pseudobulk_grads)
-        np.save('losses/celltype_grads.npy', celltype_grads)
+        # Save gradients as numpy arrays with round number
+        np.save(f'losses/pseudobulk_grads_round_{ROUND}.npy', pseudobulk_grads)
+        np.save(f'losses/celltype_grads_round_{ROUND}.npy', celltype_grads)
     
     return pseudobulk_loss, celltype_loss.mean()
 
@@ -224,12 +228,7 @@ def main():
         celltype_donors
     )
     
-    # Save losses
-    loss_file = 'losses/current_losses.txt'
-    with open(loss_file, 'w') as f:
-        f.write(f"Pseudobulk loss: {float(pseudobulk_loss):.4f}\n")
-        f.write(f"Celltype loss: {float(celltype_loss):.4f}\n")
-    logging.info(f"Saved losses to {loss_file}")
+    # Log losses
     logging.info(f"Pseudobulk loss: {float(pseudobulk_loss):.4f}")
     logging.info(f"Celltype loss: {float(celltype_loss):.4f}")
 
