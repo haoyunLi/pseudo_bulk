@@ -194,7 +194,7 @@ def main():
     logging.info("Loading embeddings and donor IDs...")
     
     # Load embeddings from NPY files
-    pseudobulk_embeddings = np.load('data/mean_embeddings.npy')
+    pseudobulk_embeddings = np.load('embeddings/pseudobulk_embeddings.npy')
     celltype_embeddings = np.load('data/celltype_specific_embeddings.npy')
     
     # Load donor IDs from CSV files

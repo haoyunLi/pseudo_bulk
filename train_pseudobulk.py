@@ -94,6 +94,14 @@ def main():
     )
     forward_fn = hk.transform(forward_fn)
     
+    # Try to load previous parameters if they exist
+    checkpoint_file = 'checkpoints/pseudobulk_final.npy'
+    if os.path.exists(checkpoint_file):
+        logging.info(f"Loading previous parameters from {checkpoint_file}")
+        parameters = load_checkpoint(checkpoint_file)
+    else:
+        logging.info("No previous parameters found, using initial parameters")
+    
     # Initialize optimizer
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
@@ -121,13 +129,13 @@ def main():
         )
         
         # Save embeddings
-        save_embeddings(embeddings, 'embeddings/pseudobulk_embeddings.npy')
+        save_embeddings(embeddings, 'embeddings/pseudobulk_embeddings_1.npy')
         
         if (i // batch_size) % 10 == 0:
             logging.info(f"Processed batch {i//batch_size + 1}/{(len(pseudobulk_tokens) + batch_size - 1)//batch_size}")
     
     # Save final checkpoint
-    save_checkpoint(parameters, 'checkpoints/pseudobulk_final.npy')
+    save_checkpoint(parameters, 'checkpoints/pseudobulk_final_1.npy')
     logging.info("Training completed!")
 
 if __name__ == "__main__":

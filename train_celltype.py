@@ -94,6 +94,14 @@ def main():
     )
     forward_fn = hk.transform(forward_fn)
     
+    # Try to load previous parameters if they exist
+    checkpoint_file = 'checkpoints/celltype_final.npy'
+    if os.path.exists(checkpoint_file):
+        logging.info(f"Loading previous parameters from {checkpoint_file}")
+        parameters = load_checkpoint(checkpoint_file)
+    else:
+        logging.info("No previous parameters found, using initial parameters")
+    
     # Initialize optimizer
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
