@@ -104,16 +104,19 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     
     # Compute loss for both directions
     # For pseudobulk samples, find their best matching celltypes
-    loss_pseudobulk = -jnp.sum(pseudobulk_labels * jax.nn.log_softmax(similarity_matrix, axis=1)) / pseudobulk_embeddings.shape[0]
+    # Normalize by the number of positive pairs per pseudobulk sample
+    positive_pairs = jnp.sum(pseudobulk_labels, axis=1, keepdims=True)
+    pseudobulk_loss = -jnp.sum(pseudobulk_labels * jax.nn.log_softmax(similarity_matrix, axis=1)) / jnp.sum(positive_pairs)
+    
     # For celltype samples, find their best matching pseudobulk
-    loss_celltype = sparse_categorical_crossentropy(celltype_labels, similarity_matrix.T)
+    celltype_loss = sparse_categorical_crossentropy(celltype_labels, similarity_matrix.T)
     
     # Log some statistics about the losses
-    logging.info(f"Mean pseudobulk loss: {float(loss_pseudobulk):.4f}")
-    logging.info(f"Mean celltype loss: {float(loss_celltype.mean()):.4f}")
+    logging.info(f"Mean pseudobulk loss: {float(pseudobulk_loss):.4f}")
+    logging.info(f"Mean celltype loss: {float(celltype_loss.mean()):.4f}")
     
     # Return both losses separately
-    return loss_pseudobulk, loss_celltype.mean()
+    return pseudobulk_loss, celltype_loss.mean()
 
 def compute_gradients(loss_fn, params, pseudobulk_embeddings, celltype_embeddings):
     """
