@@ -37,11 +37,11 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, tempera
     labels = jnp.arange(similarity_matrix.shape[0])
     
     # Compute loss for both directions
-    loss_pseudobulk = jax.nn.sparse_categorical_crossentropy(
-        labels, similarity_matrix, from_logits=True
+    loss_pseudobulk = jax.nn.sparse_categorical_crossentropy_with_logits(
+        labels, similarity_matrix
     )
-    loss_celltype = jax.nn.sparse_categorical_crossentropy(
-        labels, similarity_matrix.T, from_logits=True
+    loss_celltype = jax.nn.sparse_categorical_crossentropy_with_logits(
+        labels, similarity_matrix.T
     )
     
     # Average the losses
