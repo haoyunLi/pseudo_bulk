@@ -44,6 +44,13 @@ def load_checkpoint(filename):
     logging.info(f"Loaded checkpoint from {filename}")
     return params
 
+def create_zero_grads(params):
+    """Create zero gradients matching the parameter structure."""
+    if isinstance(params, dict):
+        return {k: create_zero_grads(v) for k, v in params.items()}
+    else:
+        return jnp.zeros_like(params)
+
 def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key):
     """Single training step."""
     # Generate embeddings
@@ -61,14 +68,11 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key):
     raw_grads = np.load('losses/celltype_grads.npy')
     
     # Create a gradient structure matching the model parameters
-    grads = {}
-    for key in params.keys():
-        if key == 'embedding':
-            # For embedding layer, use the raw gradients
-            grads[key] = jnp.array(raw_grads)
-        else:
-            # For other layers, create zero gradients
-            grads[key] = jnp.zeros_like(params[key])
+    grads = create_zero_grads(params)
+    
+    # Apply raw gradients to embedding layer
+    if 'embedding' in grads:
+        grads['embedding'] = jnp.array(raw_grads)
     
     # Update parameters using gradients
     updates, opt_state = optimizer.update(grads, opt_state, params)
