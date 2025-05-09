@@ -104,11 +104,12 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     
     # Compute loss for both directions
     positive_pairs = jnp.sum(pseudobulk_labels, axis=1, keepdims=True)
-    pseudobulk_loss = -jnp.sum(pseudobulk_labels * jax.nn.log_softmax(similarity_matrix, axis=1)) / jnp.sum(positive_pairs)
+    pseudobulk_loss = jnp.abs(-jnp.sum(pseudobulk_labels * jax.nn.log_softmax(similarity_matrix, axis=1)) / jnp.sum(positive_pairs))
     
     # Compute celltype loss using the same approach as pseudobulk loss
-    celltype_positive_pairs = jnp.sum(jax.nn.one_hot(celltype_labels, similarity_matrix.shape[0]), axis=1, keepdims=True)
-    celltype_loss = -jnp.sum(jax.nn.one_hot(celltype_labels, similarity_matrix.shape[0]) * jax.nn.log_softmax(similarity_matrix.T, axis=1)) / jnp.sum(celltype_positive_pairs)
+    celltype_one_hot = jax.nn.one_hot(celltype_labels, similarity_matrix.shape[0])
+    celltype_positive_pairs = jnp.sum(celltype_one_hot, axis=1, keepdims=True)
+    celltype_loss = jnp.abs(-jnp.sum(celltype_one_hot * jax.nn.log_softmax(similarity_matrix.T, axis=1)) / jnp.sum(celltype_positive_pairs))
     
     # Compute gradients for each batch
     batch_size = 1  # Match training batch size
@@ -158,21 +159,21 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     
     # Log some statistics about the losses
     logging.info(f"Mean pseudobulk loss: {float(pseudobulk_loss):.4f}")
-    logging.info(f"Mean celltype loss: {float(celltype_loss.mean()):.4f}")
+    logging.info(f"Mean celltype loss: {float(celltype_loss):.4f}")
     
     # Save losses and gradients to file with round number
     os.makedirs('losses', exist_ok=True)
     with open(f'losses/current_losses_round_{ROUND}.txt', 'w') as f:
         f.write(f"Round: {ROUND}\n")
         f.write(f"Pseudobulk loss: {float(pseudobulk_loss):.4f}\n")
-        f.write(f"Celltype loss: {float(celltype_loss.mean()):.4f}\n")
+        f.write(f"Celltype loss: {float(celltype_loss):.4f}\n")
         f.write(f"Pseudobulk gradients shape: {pseudobulk_grads.shape}\n")
         f.write(f"Celltype gradients shape: {celltype_grads.shape}\n")
         # Save gradients as numpy arrays with round number
         np.save(f'losses/pseudobulk_grads_round_{ROUND}.npy', pseudobulk_grads)
         np.save(f'losses/celltype_grads_round_{ROUND}.npy', celltype_grads)
     
-    return pseudobulk_loss, celltype_loss.mean()
+    return pseudobulk_loss, celltype_loss
 
 def compute_gradients(loss_fn, params, pseudobulk_embeddings, celltype_embeddings):
     """
