@@ -75,7 +75,7 @@ def main():
     # Load embeddings
     logging.info("Loading embeddings...")
     pseudobulk_embeddings = np.load('data/mean_embeddings.npy')
-    celltype_embeddings = np.load('data/celltype_specific_embeddings.npy ')
+    celltype_embeddings = np.load('data/celltype_specific_embeddings.npy')
     
     # Convert to JAX arrays
     pseudobulk_embeddings = jnp.array(pseudobulk_embeddings)
