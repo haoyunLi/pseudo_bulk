@@ -99,7 +99,8 @@ def main():
     
     # Try to load previous parameters if they exist
     current_checkpoint = f'checkpoints/pseudobulk_round_{ROUND}.npy'
-    previous_checkpoint = f'checkpoints/pseudobulk_round_{ROUND-1}.npy'
+    #previous_checkpoint = f'checkpoints/pseudobulk_round_{ROUND-1}.npy'
+    previous_checkpoint = f'checkpoints/pseudobulk_final.npy'
     
     if os.path.exists(current_checkpoint):
         logging.info(f"Loading current round parameters from {current_checkpoint}")

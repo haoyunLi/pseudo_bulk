@@ -203,7 +203,7 @@ def main():
     
     # Load embeddings from NPY files
     pseudobulk_embeddings = np.load('embeddings/pseudobulk_embeddings.npy')
-    celltype_embeddings = np.load('data/celltype_specific_embeddings.npy')
+    celltype_embeddings = np.load('embeddings/celltype_embeddings.npy')
     
     # Load donor IDs from CSV files
     pseudobulk_df = pd.read_csv('data/mean_embeddings.csv', index_col=0)
