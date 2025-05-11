@@ -202,7 +202,7 @@ def main():
     logging.info("Loading embeddings and donor IDs...")
     
     # Load embeddings from NPY files
-    pseudobulk_embeddings = np.load(f'embeddings/pseudobulk_embeddings{ROUND-1}.npy')
+    pseudobulk_embeddings = np.load(f'embeddings/pseudobulk_embeddings_round_{ROUND-1}.npy')
     celltype_embeddings = np.load(f'embeddings/celltype_embeddings_round_{ROUND-1}.npy')
     
     # Load donor IDs from CSV files
