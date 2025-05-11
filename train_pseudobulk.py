@@ -17,7 +17,7 @@ logging.basicConfig(
 )
 
 # Track the current round number
-ROUND = 1  # Change this number for each new run
+ROUND = 2  # Change this number for each new run
 
 # Optimize JAX configuration for GPU
 jax.config.update('jax_platform_name', 'gpu')
@@ -99,8 +99,8 @@ def main():
     
     # Try to load previous parameters if they exist
     current_checkpoint = f'checkpoints/pseudobulk_round_{ROUND}.npy'
-    #previous_checkpoint = f'checkpoints/pseudobulk_round_{ROUND-1}.npy'
-    previous_checkpoint = f'checkpoints/pseudobulk_final.npy'
+    previous_checkpoint = f'checkpoints/pseudobulk_round_{ROUND-1}.npy'
+    #previous_checkpoint = f'checkpoints/pseudobulk_final.npy'
     
     if os.path.exists(current_checkpoint):
         logging.info(f"Loading current round parameters from {current_checkpoint}")

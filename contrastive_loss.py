@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 
 # Track the current round number
-ROUND = 1  # Change this number for each new run
+ROUND = 2  # Change this number for each new run
 
 def sparse_categorical_crossentropy(labels, logits):
     """
@@ -202,8 +202,8 @@ def main():
     logging.info("Loading embeddings and donor IDs...")
     
     # Load embeddings from NPY files
-    pseudobulk_embeddings = np.load('embeddings/pseudobulk_embeddings.npy')
-    celltype_embeddings = np.load('embeddings/celltype_embeddings.npy')
+    pseudobulk_embeddings = np.load(f'embeddings/pseudobulk_embeddings{ROUND-1}.npy')
+    celltype_embeddings = np.load(f'embeddings/celltype_embeddings_round_{ROUND-1}.npy')
     
     # Load donor IDs from CSV files
     pseudobulk_df = pd.read_csv('data/mean_embeddings.csv', index_col=0)
