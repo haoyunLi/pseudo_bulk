@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 
 # Track the current round number
-ROUND = 1  # Change this number for each new run
+ROUND = 2 # Change this number for each new run
 
 def sparse_categorical_crossentropy(labels, logits):
     """
@@ -143,8 +143,8 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     logging.info(f"Celltype gradients size in MB: {celltype_grads.nbytes / (1024 * 1024):.2f}")
     
     # Log some statistics about the losses
-    logging.info(f"Mean pseudobulk loss: {float(pseudobulk_loss):.4f}")
-    logging.info(f"Mean celltype loss: {float(celltype_loss):.4f}")
+    logging.info(f"pseudobulk loss: {float(pseudobulk_loss):.4f}")
+    logging.info(f"celltype loss: {float(celltype_loss):.4f}")
     
     # Save losses and gradients to file with round number
     os.makedirs('losses', exist_ok=True)
@@ -188,11 +188,11 @@ def main():
     logging.info("Loading embeddings and donor IDs...")
     
     # Load embeddings from NPY files
-    #pseudobulk_embeddings = np.load(f'embeddings/pseudobulk_embeddings_round_{ROUND-1}.npy')
-    #celltype_embeddings = np.load(f'embeddings/celltype_embeddings_round_{ROUND-1}.npy')
+    pseudobulk_embeddings = np.load(f'embeddings/pseudobulk_embeddings_round_{ROUND-1}.npy')
+    celltype_embeddings = np.load(f'embeddings/celltype_embeddings_round_{ROUND-1}.npy')
     
-    pseudobulk_embeddings = np.load(f'data/mean_embeddings.npy')
-    celltype_embeddings = np.load(f'data/celltype_specific_embeddings.npy')
+    #pseudobulk_embeddings = np.load(f'data/mean_embeddings.npy')
+    #celltype_embeddings = np.load(f'data/celltype_specific_embeddings.npy')
     
     # Load donor IDs from CSV files
     pseudobulk_df = pd.read_csv('data/mean_embeddings.csv', index_col=0)

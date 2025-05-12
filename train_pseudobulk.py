@@ -31,10 +31,31 @@ def load_data():
     return pd.read_csv("data/processed_pseudobulk_expression_W.csv", index_col=0)
 
 def save_embeddings(embeddings, filename):
-    """Save embeddings to a numpy file."""
-    embeddings_np = np.array(embeddings)
-    np.save(filename, embeddings_np)
-    logging.info(f"Saved embeddings to {filename}")
+    """Save embeddings to a numpy file, accumulating them if the file exists."""
+    try:
+        # Convert current batch to numpy array
+        embeddings_np = np.array(embeddings, dtype=np.float32)
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        
+        # If file exists, load and concatenate
+        if os.path.exists(filename):
+            existing_embeddings = np.load(filename)
+            embeddings_np = np.concatenate([existing_embeddings, embeddings_np], axis=0)
+        
+        # Save the accumulated embeddings
+        np.save(filename, embeddings_np, allow_pickle=False)
+        
+        # Verify the save
+        loaded = np.load(filename)
+        if loaded.shape != embeddings_np.shape:
+            raise ValueError(f"Saved shape {loaded.shape} doesn't match expected shape {embeddings_np.shape}")
+            
+        logging.info(f"Saved embeddings to {filename} with shape {embeddings_np.shape}")
+    except Exception as e:
+        logging.error(f"Error saving embeddings to {filename}: {str(e)}")
+        raise
 
 def save_checkpoint(params, filename):
     """Save model parameters to a numpy file."""

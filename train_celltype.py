@@ -17,7 +17,7 @@ logging.basicConfig(
 )
 
 # Track the current round number
-ROUND = 1  # Change this number for each new run
+ROUND = 1 # Change this number for each new run
 
 # Optimize JAX configuration for GPU
 jax.config.update('jax_platform_name', 'gpu')
@@ -31,21 +31,26 @@ def load_data():
     return pd.read_csv("data/celltype_specific_2d_matrix.csv", index_col=0)
 
 def save_embeddings(embeddings, filename):
-    """Save embeddings to a numpy file."""
+    """Save embeddings to a numpy file, accumulating them if the file exists."""
     try:
-        # Convert to numpy array and ensure it's float32
+        # Convert current batch to numpy array
         embeddings_np = np.array(embeddings, dtype=np.float32)
         
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(filename), exist_ok=True)
         
-        # Save with proper formatting
+        # If file exists, load and concatenate
+        if os.path.exists(filename):
+            existing_embeddings = np.load(filename)
+            embeddings_np = np.concatenate([existing_embeddings, embeddings_np], axis=0)
+        
+        # Save the accumulated embeddings
         np.save(filename, embeddings_np, allow_pickle=False)
         
-        # Verify the file was saved correctly
+        # Verify the save
         loaded = np.load(filename)
         if loaded.shape != embeddings_np.shape:
-            raise ValueError(f"Saved shape {loaded.shape} doesn't match original shape {embeddings_np.shape}")
+            raise ValueError(f"Saved shape {loaded.shape} doesn't match expected shape {embeddings_np.shape}")
             
         logging.info(f"Saved embeddings to {filename} with shape {embeddings_np.shape}")
     except Exception as e:
