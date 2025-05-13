@@ -2,3 +2,9 @@ env/
 .DS_Store 
 data/ 
 multiomics-open-research/
+*_job
+checkpoints/
+embeddings/
+losses/
+__pycache__/
+*.sbatch

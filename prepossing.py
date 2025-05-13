@@ -102,9 +102,9 @@ def save_processed_data(processed_data: pd.DataFrame, output_path: str) -> None:
 
 if __name__ == "__main__":
     # Load the data
-    pseudobulk_data_path = 'data/weighted_pseudobulk_expression.csv'
+    pseudobulk_data_path = 'data/new_pseudobulk_expression.csv'
     common_genes_path = 'data/common_gene_id.txt'
-    output_path = 'data/processed_pseudobulk_expression_W.csv'
+    output_path = 'data/processed_new_pseudobulk_expression.csv'
 
     # Process the data
     processed_data = process_pseudobulk_data(pseudobulk_data_path, common_genes_path)
