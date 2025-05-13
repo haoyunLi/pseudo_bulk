@@ -17,7 +17,7 @@ logging.basicConfig(
 )
 
 # Track the current round number
-ROUND = 1  # Change this number for each new run
+ROUND = 2  # Change this number for each new run
 
 # Optimize JAX configuration for GPU
 jax.config.update('jax_platform_name', 'gpu')
