@@ -76,7 +76,7 @@ def create_zero_grads(params):
     else:
         return jnp.zeros_like(params)
 
-def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key):
+def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors):
     """Single training step."""
     # Generate embeddings
     outs = forward_fn.apply(params, rng_key, batch)
@@ -151,6 +151,11 @@ def main():
     pseudobulk_array = preprocess_rna_seq_for_bulkrnabert(pseudobulk_df, config)
     pseudobulk_tokens = jnp.asarray(tokenizer.batch_tokenize(pseudobulk_array), dtype=jnp.int32)
     
+    # Get donor IDs
+    pseudobulk_donors = pseudobulk_df.index.tolist()
+    celltype_df = pd.read_csv("data/celltype_specific_2d_matrix.csv", index_col=0)
+    celltype_donors = celltype_df.index.tolist()
+    
     # Training parameters
     batch_size = 1
     total_loss = 0
@@ -162,7 +167,8 @@ def main():
         # Training step
         rng_key = jax.random.PRNGKey(i)
         parameters, opt_state, embeddings, pseudobulk_loss = train_step(
-            parameters, opt_state, batch, forward_fn, optimizer, rng_key
+            parameters, opt_state, batch, forward_fn, optimizer, rng_key,
+            pseudobulk_donors, celltype_donors
         )
         
         total_loss += float(pseudobulk_loss)
