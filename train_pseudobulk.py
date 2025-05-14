@@ -8,7 +8,7 @@ import haiku as hk
 import pandas as pd
 from multiomics_open_research.bulk_rna_bert.pretrained import get_pretrained_model
 from multiomics_open_research.bulk_rna_bert.preprocess import preprocess_rna_seq_for_bulkrnabert
-from contrastive_lossontrastive_loss import compute_contrastive_loss
+from contrastive_loss import compute_contrastive_loss
 
 # Configure logging
 logging.basicConfig(
