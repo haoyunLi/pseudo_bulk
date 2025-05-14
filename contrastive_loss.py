@@ -46,7 +46,7 @@ def extract_donor_id(celltype_id):
     """Extract donor ID from celltype ID (format: 'celltype|donor_id')"""
     return celltype_id.split('|')[1]
 
-def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudobulk_donors, celltype_donors, temperature=0.07):
+def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudobulk_donors, celltype_donors, temperature=0.07, is_training=False):
     """
     Compute contrastive loss between pseudobulk and celltype embeddings.
     
@@ -56,6 +56,7 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
         pseudobulk_donors: Donor IDs for pseudobulk samples
         celltype_donors: Donor IDs for celltype samples
         temperature: Temperature parameter for softmax scaling
+        is_training: Whether this is being called during training (gradient computation)
         
     Returns:
         Tuple of (pseudobulk_loss, celltype_loss) where each is the mean loss for that direction
@@ -70,8 +71,8 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     # Create sample indices from donor IDs
     sample_indices = jnp.array([donor_to_index[extract_donor_id(donor)] for donor in celltype_donors])
     
-    # Log the mapping (only during non-gradient computation)
-    if not jax.core.is_abstract(pseudobulk_embeddings):
+    # Log the mapping (only during non-training)
+    if not is_training:
         unique_samples = jnp.unique(sample_indices)
         logging.info(f"Number of unique samples: {len(unique_samples)}")
         for sample_idx in unique_samples:
@@ -91,8 +92,8 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     # Compute similarity matrix [n_pseudobulk, n_celltypes]
     similarity_matrix = jnp.matmul(pseudobulk_normalized, celltype_normalized.T) / temperature
     
-    # Log shapes (only during non-gradient computation)
-    if not jax.core.is_abstract(pseudobulk_embeddings):
+    # Log shapes (only during non-training)
+    if not is_training:
         logging.info(f"Similarity matrix shape: {similarity_matrix.shape}")
     
     # Create labels for each direction
@@ -103,8 +104,8 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     
     celltype_labels = sample_indices
     
-    # Log shapes (only during non-gradient computation)
-    if not jax.core.is_abstract(pseudobulk_embeddings):
+    # Log shapes (only during non-training)
+    if not is_training:
         logging.info(f"Pseudobulk labels shape: {pseudobulk_labels.shape}")
         logging.info(f"Celltype labels shape: {celltype_labels.shape}")
     
@@ -117,8 +118,8 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     celltype_positive_pairs = jnp.sum(celltype_one_hot, axis=1, keepdims=True)
     celltype_loss = -jnp.sum(celltype_one_hot * jax.nn.log_softmax(similarity_matrix.T, axis=1)) / jnp.sum(celltype_positive_pairs)
     
-    # Log losses (only during non-gradient computation)
-    if not jax.core.is_abstract(pseudobulk_embeddings):
+    # Log losses (only during non-training)
+    if not is_training:
         logging.info(f"pseudobulk loss: {float(pseudobulk_loss):.4f}")
         logging.info(f"celltype loss: {float(celltype_loss):.4f}")
     

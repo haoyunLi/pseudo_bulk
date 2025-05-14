@@ -99,7 +99,8 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudob
             pseudobulk_embeddings,
             batch_embeddings,
             pseudobulk_donors,
-            celltype_donors
+            celltype_donors,
+            is_training=True
         )
         return loss
     
@@ -110,7 +111,16 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudob
     updates, opt_state = optimizer.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
     
-    return params, opt_state, batch_embeddings, loss_fn(params)
+    # Compute final loss for logging (without gradient computation)
+    _, final_loss = compute_contrastive_loss(
+        pseudobulk_embeddings,
+        batch_embeddings,
+        pseudobulk_donors,
+        celltype_donors,
+        is_training=False
+    )
+    
+    return params, opt_state, batch_embeddings, final_loss
 
 def main():
     # Create directories
