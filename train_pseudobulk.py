@@ -8,6 +8,7 @@ import haiku as hk
 import pandas as pd
 from multiomics_open_research.bulk_rna_bert.pretrained import get_pretrained_model
 from multiomics_open_research.bulk_rna_bert.preprocess import preprocess_rna_seq_for_bulkrnabert
+from contrastive_lossontrastive_loss import compute_contrastive_loss
 
 # Configure logging
 logging.basicConfig(
@@ -81,30 +82,34 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key):
     outs = forward_fn.apply(params, rng_key, batch)
     embeddings = outs["embeddings_4"].mean(axis=1)
     
-    # Load current loss and gradients from files
-    with open(f'losses/current_losses_round_{ROUND}.txt', 'r') as f:
-        for line in f:
-            if line.startswith('Pseudobulk loss:'):
-                loss = float(line.split(':')[1].strip())
-                break
+    # Load current embeddings for contrastive loss computation
+    if ROUND == 1:
+        celltype_embeddings = np.load(f'data/celltype_specific_embeddings.npy')
+    else:
+        celltype_embeddings = np.load(f'embeddings/celltype_embeddings_round_{ROUND-1}.npy')
     
-    # Load gradients
-    raw_grads = np.load(f'losses/pseudobulk_grads_round_{ROUND}.npy')
+    # Compute only pseudobulk loss and gradients
+    pseudobulk_loss, _ = compute_contrastive_loss(
+        embeddings,
+        celltype_embeddings,
+        pseudobulk_donors,
+        celltype_donors
+    )
     
     # Create a gradient structure matching the model parameters
     grads = create_zero_grads(params)
     
-    # Apply raw gradients to embedding layer
+    # Apply gradients to embedding layer
     if 'embedding' in grads:
-        # Assert gradient shapes match
-        assert raw_grads.shape == grads['embedding'].shape, f"Mismatch in gradient shape! Expected {grads['embedding'].shape}, got {raw_grads.shape}"
-        grads['embedding'] = jnp.array(raw_grads)
+        # Compute gradients for pseudobulk embeddings only
+        pseudobulk_grads = jax.grad(lambda x: compute_contrastive_loss(x, celltype_embeddings, pseudobulk_donors, celltype_donors)[0])(embeddings)
+        grads['embedding'] = jnp.array(pseudobulk_grads)
     
     # Update parameters using gradients
     updates, opt_state = optimizer.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
     
-    return params, opt_state, embeddings
+    return params, opt_state, embeddings, pseudobulk_loss
 
 def main():
     # Create directories
@@ -123,7 +128,6 @@ def main():
     # Try to load previous parameters if they exist
     current_checkpoint = f'checkpoints/pseudobulk_round_{ROUND}.npy'
     previous_checkpoint = f'checkpoints/pseudobulk_round_{ROUND-1}.npy'
-    #previous_checkpoint = f'checkpoints/pseudobulk_final.npy'
     
     if os.path.exists(current_checkpoint):
         logging.info(f"Loading current round parameters from {current_checkpoint}")
@@ -149,6 +153,7 @@ def main():
     
     # Training parameters
     batch_size = 1
+    total_loss = 0
     
     # Process in batches
     for i in range(0, len(pseudobulk_tokens), batch_size):
@@ -156,15 +161,18 @@ def main():
         
         # Training step
         rng_key = jax.random.PRNGKey(i)
-        parameters, opt_state, embeddings = train_step(
+        parameters, opt_state, embeddings, pseudobulk_loss = train_step(
             parameters, opt_state, batch, forward_fn, optimizer, rng_key
         )
+        
+        total_loss += float(pseudobulk_loss)
         
         # Save embeddings
         save_embeddings(embeddings, f'embeddings/pseudobulk_embeddings_round_{ROUND}.npy')
         
         if (i // batch_size) % 10 == 0:
-            logging.info(f"Processed batch {i//batch_size + 1}/{(len(pseudobulk_tokens) + batch_size - 1)//batch_size}")
+            avg_loss = total_loss / ((i // batch_size) + 1)
+            logging.info(f"Processed batch {i//batch_size + 1}/{(len(pseudobulk_tokens) + batch_size - 1)//batch_size}, Average loss: {avg_loss:.4f}")
     
     # Save final checkpoint
     save_checkpoint(parameters, f'checkpoints/pseudobulk_round_{ROUND}.npy')

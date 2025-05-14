@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 
 # Track the current round number
-ROUND = 3 # Change this number for each new run
+ROUND = 1  # Change this number for each new run
 
 def sparse_categorical_crossentropy(labels, logits):
     """
