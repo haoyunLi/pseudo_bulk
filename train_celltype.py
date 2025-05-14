@@ -78,9 +78,9 @@ def create_zero_grads(params):
 
 def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors):
     """Single training step."""
-    # Generate embeddings
+    # Generate embeddings for the current batch
     outs = forward_fn.apply(params, rng_key, batch)
-    embeddings = outs["embeddings_4"].mean(axis=1)
+    batch_embeddings = outs["embeddings_4"].mean(axis=1)
     
     # Load current embeddings for contrastive loss computation
     if ROUND == 1:
@@ -88,12 +88,16 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudob
     else:
         pseudobulk_embeddings = np.load(f'embeddings/pseudobulk_embeddings_round_{ROUND-1}.npy')
     
-    # Compute only celltype loss and gradients
+    # Get the donor IDs for the current batch
+    batch_indices = [i for i in range(len(celltype_donors)) if i < len(batch_embeddings)]
+    batch_donors = [celltype_donors[i] for i in batch_indices]
+    
+    # Compute loss for the current batch against all pseudobulk embeddings
     _, celltype_loss = compute_contrastive_loss(
         pseudobulk_embeddings,
-        embeddings,
+        batch_embeddings,
         pseudobulk_donors,
-        celltype_donors
+        batch_donors
     )
     
     # Create a gradient structure matching the model parameters
@@ -102,14 +106,14 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudob
     # Apply gradients to embedding layer
     if 'embedding' in grads:
         # Compute gradients for celltype embeddings only
-        celltype_grads = jax.grad(lambda x: compute_contrastive_loss(pseudobulk_embeddings, x, pseudobulk_donors, celltype_donors)[1])(embeddings)
+        celltype_grads = jax.grad(lambda x: compute_contrastive_loss(pseudobulk_embeddings, x, pseudobulk_donors, batch_donors)[1])(batch_embeddings)
         grads['embedding'] = jnp.array(celltype_grads)
     
     # Update parameters using gradients
     updates, opt_state = optimizer.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
     
-    return params, opt_state, embeddings, celltype_loss
+    return params, opt_state, batch_embeddings, celltype_loss
 
 def main():
     # Create directories
@@ -159,26 +163,37 @@ def main():
     # Training parameters
     batch_size = 1
     total_loss = 0
+    all_embeddings = []
+    processed_samples = set()  # Track processed samples
     
     # Process in batches
     for i in range(0, len(celltype_tokens), batch_size):
         batch = celltype_tokens[i:i + batch_size]
+        current_donor = celltype_donors[i]
+        
+        # Skip if we've already processed this sample
+        if current_donor in processed_samples:
+            continue
+            
+        processed_samples.add(current_donor)
         
         # Training step
         rng_key = jax.random.PRNGKey(i)
-        parameters, opt_state, embeddings, celltype_loss = train_step(
+        parameters, opt_state, batch_embeddings, celltype_loss = train_step(
             parameters, opt_state, batch, forward_fn, optimizer, rng_key,
             pseudobulk_donors, celltype_donors
         )
         
         total_loss += float(celltype_loss)
-        
-        # Save embeddings
-        save_embeddings(embeddings, f'embeddings/celltype_embeddings_round_{ROUND}.npy')
+        all_embeddings.append(batch_embeddings)
         
         if (i // batch_size) % 10 == 0:
-            avg_loss = total_loss / ((i // batch_size) + 1)
-            logging.info(f"Processed batch {i//batch_size + 1}/{(len(celltype_tokens) + batch_size - 1)//batch_size}, Average loss: {avg_loss:.4f}")
+            avg_loss = total_loss / len(processed_samples)
+            logging.info(f"Processed {len(processed_samples)}/{len(celltype_donors)} samples, Average loss: {avg_loss:.4f}")
+    
+    # Concatenate all embeddings and save
+    all_embeddings = np.concatenate(all_embeddings, axis=0)
+    np.save(f'embeddings/celltype_embeddings_round_{ROUND}.npy', all_embeddings)
     
     # Save final checkpoint
     save_checkpoint(parameters, f'checkpoints/celltype_round_{ROUND}.npy')

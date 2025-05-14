@@ -159,26 +159,37 @@ def main():
     # Training parameters
     batch_size = 1
     total_loss = 0
+    all_embeddings = []
+    processed_samples = set()  # Track processed samples
     
     # Process in batches
     for i in range(0, len(pseudobulk_tokens), batch_size):
         batch = pseudobulk_tokens[i:i + batch_size]
+        current_donor = pseudobulk_donors[i]
+        
+        # Skip if we've already processed this sample
+        if current_donor in processed_samples:
+            continue
+            
+        processed_samples.add(current_donor)
         
         # Training step
         rng_key = jax.random.PRNGKey(i)
-        parameters, opt_state, embeddings, pseudobulk_loss = train_step(
+        parameters, opt_state, batch_embeddings, pseudobulk_loss = train_step(
             parameters, opt_state, batch, forward_fn, optimizer, rng_key,
             pseudobulk_donors, celltype_donors
         )
         
         total_loss += float(pseudobulk_loss)
-        
-        # Save embeddings
-        save_embeddings(embeddings, f'embeddings/pseudobulk_embeddings_round_{ROUND}.npy')
+        all_embeddings.append(batch_embeddings)
         
         if (i // batch_size) % 10 == 0:
-            avg_loss = total_loss / ((i // batch_size) + 1)
-            logging.info(f"Processed batch {i//batch_size + 1}/{(len(pseudobulk_tokens) + batch_size - 1)//batch_size}, Average loss: {avg_loss:.4f}")
+            avg_loss = total_loss / len(processed_samples)
+            logging.info(f"Processed {len(processed_samples)}/{len(pseudobulk_donors)} samples, Average loss: {avg_loss:.4f}")
+    
+    # Concatenate all embeddings and save
+    all_embeddings = np.concatenate(all_embeddings, axis=0)
+    np.save(f'embeddings/pseudobulk_embeddings_round_{ROUND}.npy', all_embeddings)
     
     # Save final checkpoint
     save_checkpoint(parameters, f'checkpoints/pseudobulk_round_{ROUND}.npy')
