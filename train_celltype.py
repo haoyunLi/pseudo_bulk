@@ -95,7 +95,7 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudob
     def loss_fn(embedding_params):
         # Create a copy of params with updated embedding parameters
         updated_params = {k: v for k, v in params.items()}
-        updated_params['embedding'] = embedding_params
+        updated_params['token_embedding'] = embedding_params  # Changed from 'embedding' to 'token_embedding'
         
         # Forward pass with updated parameters
         outs = forward_fn.apply(updated_params, rng_key, batch)
@@ -115,8 +115,8 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudob
     grads = create_zero_grads(params)
     
     # Compute gradients only for embedding layer
-    embedding_grads = jax.grad(loss_fn)(params['embedding'])
-    grads['embedding'] = embedding_grads
+    embedding_grads = jax.grad(loss_fn)(params['token_embedding'])  # Changed from 'embedding' to 'token_embedding'
+    grads['token_embedding'] = embedding_grads  # Changed from 'embedding' to 'token_embedding'
     
     # Update parameters using gradients
     updates, opt_state = optimizer.update(grads, opt_state, params)
