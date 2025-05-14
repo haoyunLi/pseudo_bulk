@@ -111,53 +111,9 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     celltype_positive_pairs = jnp.sum(celltype_one_hot, axis=1, keepdims=True)
     celltype_loss = -jnp.sum(celltype_one_hot * jax.nn.log_softmax(similarity_matrix.T, axis=1)) / jnp.sum(celltype_positive_pairs)
     
-    # Compute gradients using value_and_grad
-    def loss_fn(pb_emb, ct_emb):
-        # Normalize embeddings
-        pb_norm = jnp.linalg.norm(pb_emb, axis=1, keepdims=True)
-        ct_norm = jnp.linalg.norm(ct_emb, axis=1, keepdims=True)
-        pb_normalized = pb_emb / (pb_norm + eps)
-        ct_normalized = ct_emb / (ct_norm + eps)
-        
-        # Compute similarity matrix
-        sim_matrix = jnp.matmul(pb_normalized, ct_normalized.T) / temperature
-        
-        # Compute losses
-        pb_loss = -jnp.sum(pseudobulk_labels * jax.nn.log_softmax(sim_matrix, axis=1)) / jnp.sum(positive_pairs)
-        ct_loss = -jnp.sum(celltype_one_hot * jax.nn.log_softmax(sim_matrix.T, axis=1)) / jnp.sum(celltype_positive_pairs)
-        
-        return pb_loss + ct_loss
-    
-    # Compute gradients with respect to both embeddings
-    grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 1))
-    (total_loss, (pseudobulk_grads, celltype_grads)) = grad_fn(pseudobulk_embeddings, celltype_embeddings)
-    
-    # Convert gradients to numpy arrays with float32 dtype
-    pseudobulk_grads = np.array(pseudobulk_grads, dtype=np.float32)
-    celltype_grads = np.array(celltype_grads, dtype=np.float32)
-    
-    # Log gradient sizes
-    logging.info(f"Pseudobulk gradients shape: {pseudobulk_grads.shape}")
-    logging.info(f"Celltype gradients shape: {celltype_grads.shape}")
-    logging.info(f"Pseudobulk gradients size in MB: {pseudobulk_grads.nbytes / (1024 * 1024):.2f}")
-    logging.info(f"Celltype gradients size in MB: {celltype_grads.nbytes / (1024 * 1024):.2f}")
-    
     # Log some statistics about the losses
     logging.info(f"pseudobulk loss: {float(pseudobulk_loss):.4f}")
     logging.info(f"celltype loss: {float(celltype_loss):.4f}")
-    
-    # Save losses and gradients to file with round number
-    os.makedirs('losses', exist_ok=True)
-    with open(f'losses/current_losses_round_{ROUND}.txt', 'w') as f:
-        f.write(f"Round: {ROUND}\n")
-        f.write(f"Pseudobulk loss: {float(pseudobulk_loss):.4f}\n")
-        f.write(f"Celltype loss: {float(celltype_loss):.4f}\n")
-        f.write(f"Pseudobulk gradients shape: {pseudobulk_grads.shape}\n")
-        f.write(f"Celltype gradients shape: {celltype_grads.shape}\n")
-    
-    # Save gradients as numpy arrays with round number
-    np.save(f'losses/pseudobulk_grads_round_{ROUND}.npy', pseudobulk_grads)
-    np.save(f'losses/celltype_grads_round_{ROUND}.npy', celltype_grads)
     
     return pseudobulk_loss, celltype_loss
 
