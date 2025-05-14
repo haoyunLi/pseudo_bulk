@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 
 # Track the current round number
-ROUND = 2 # Change this number for each new run
+ROUND = 3 # Change this number for each new run
 
 def sparse_categorical_crossentropy(labels, logits):
     """
@@ -104,12 +104,12 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     
     # Compute loss for both directions
     positive_pairs = jnp.sum(pseudobulk_labels, axis=1, keepdims=True)
-    pseudobulk_loss = -jnp.sum(pseudobulk_labels * jax.nn.log_softmax(similarity_matrix, axis=1)) / jnp.sum(positive_pairs)
+    pseudobulk_loss = jnp.abs(-jnp.sum(pseudobulk_labels * jax.nn.log_softmax(similarity_matrix, axis=1)) / jnp.sum(positive_pairs))
     
     # Compute celltype loss using the same approach as pseudobulk loss
     celltype_one_hot = jax.nn.one_hot(celltype_labels, similarity_matrix.shape[0])
     celltype_positive_pairs = jnp.sum(celltype_one_hot, axis=1, keepdims=True)
-    celltype_loss = -jnp.sum(celltype_one_hot * jax.nn.log_softmax(similarity_matrix.T, axis=1)) / jnp.sum(celltype_positive_pairs)
+    celltype_loss = jnp.abs(-jnp.sum(celltype_one_hot * jax.nn.log_softmax(similarity_matrix.T, axis=1)) / jnp.sum(celltype_positive_pairs))
     
     # Compute gradients using value_and_grad
     def loss_fn(pb_emb, ct_emb):
@@ -123,8 +123,8 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
         sim_matrix = jnp.matmul(pb_normalized, ct_normalized.T) / temperature
         
         # Compute losses
-        pb_loss = -jnp.sum(pseudobulk_labels * jax.nn.log_softmax(sim_matrix, axis=1)) / jnp.sum(positive_pairs)
-        ct_loss = -jnp.sum(celltype_one_hot * jax.nn.log_softmax(sim_matrix.T, axis=1)) / jnp.sum(celltype_positive_pairs)
+        pb_loss = jnp.abs(-jnp.sum(pseudobulk_labels * jax.nn.log_softmax(sim_matrix, axis=1)) / jnp.sum(positive_pairs))
+        ct_loss = jnp.abs(-jnp.sum(celltype_one_hot * jax.nn.log_softmax(sim_matrix.T, axis=1)) / jnp.sum(celltype_positive_pairs))
         
         return pb_loss + ct_loss
     
