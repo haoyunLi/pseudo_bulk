@@ -91,32 +91,26 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudob
     else:
         pseudobulk_embeddings = np.load(f'embeddings/pseudobulk_embeddings_round_{ROUND-1}.npy')
     
-    # Get the donor IDs for the current batch
-    batch_indices = [i for i in range(len(celltype_donors)) if i < len(batch_embeddings)]
-    batch_donors = [celltype_donors[i] for i in batch_indices]
+    # Define loss function that takes model parameters as input
+    def loss_fn(params):
+        outs = forward_fn.apply(params, rng_key, batch)
+        batch_embeddings = outs["embeddings_4"].mean(axis=1)
+        _, loss = compute_contrastive_loss(
+            pseudobulk_embeddings,
+            batch_embeddings,
+            pseudobulk_donors,
+            celltype_donors
+        )
+        return loss
     
-    # Compute loss for the current batch against all pseudobulk embeddings
-    _, celltype_loss = compute_contrastive_loss(
-        pseudobulk_embeddings,
-        batch_embeddings,
-        pseudobulk_donors,
-        batch_donors
-    )
-    
-    # Create a gradient structure matching the model parameters
-    grads = create_zero_grads(params)
-    
-    # Apply gradients to embedding layer
-    if 'embedding' in grads:
-        # Compute gradients for celltype embeddings only
-        celltype_grads = jax.grad(lambda x: compute_contrastive_loss(pseudobulk_embeddings, x, pseudobulk_donors, batch_donors)[1])(batch_embeddings)
-        grads['embedding'] = jnp.array(celltype_grads)
+    # Compute gradients with respect to model parameters
+    grads = jax.grad(loss_fn)(params)
     
     # Update parameters using gradients
     updates, opt_state = optimizer.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
     
-    return params, opt_state, batch_embeddings, celltype_loss
+    return params, opt_state, batch_embeddings, loss_fn(params)
 
 def main():
     # Create directories
