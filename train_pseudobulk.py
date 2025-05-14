@@ -29,7 +29,10 @@ jax.config.update('jax_threefry_partitionable', True)  # Enable better paralleli
 
 def load_data():
     """Load pseudobulk data."""
-    return pd.read_csv("data/processed_pseudobulk_expression_W.csv", index_col=0)
+    df = pd.read_csv("data/processed_pseudobulk_expression_W.csv", index_col=0)
+    # Ensure we only have unique samples
+    df = df[~df.index.duplicated(keep='first')]
+    return df
 
 def save_embeddings(embeddings, filename):
     """Save embeddings to a numpy file, accumulating them if the file exists."""
@@ -148,12 +151,15 @@ def main():
     # Load data
     logging.info("Loading data...")
     pseudobulk_df = load_data()
+    logging.info(f"Number of unique pseudobulk samples: {len(pseudobulk_df)}")
+    
     pseudobulk_array = preprocess_rna_seq_for_bulkrnabert(pseudobulk_df, config)
     pseudobulk_tokens = jnp.asarray(tokenizer.batch_tokenize(pseudobulk_array), dtype=jnp.int32)
     
     # Get donor IDs
     pseudobulk_donors = pseudobulk_df.index.tolist()
     celltype_df = pd.read_csv("data/celltype_specific_2d_matrix.csv", index_col=0)
+    celltype_df = celltype_df[~celltype_df.index.duplicated(keep='first')]
     celltype_donors = celltype_df.index.tolist()
     
     # Training parameters
@@ -189,6 +195,7 @@ def main():
     
     # Concatenate all embeddings and save
     all_embeddings = np.concatenate(all_embeddings, axis=0)
+    logging.info(f"Final embeddings shape: {all_embeddings.shape}")
     np.save(f'embeddings/pseudobulk_embeddings_round_{ROUND}.npy', all_embeddings)
     
     # Save final checkpoint
