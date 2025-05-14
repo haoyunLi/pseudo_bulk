@@ -91,10 +91,17 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudob
     else:
         celltype_embeddings = np.load(f'embeddings/celltype_embeddings_round_{ROUND-1}.npy')
     
-    # Define loss function that takes model parameters as input
-    def loss_fn(params):
-        outs = forward_fn.apply(params, rng_key, batch)
+    # Define loss function that takes only embedding parameters as input
+    def loss_fn(embedding_params):
+        # Create a copy of params with updated embedding parameters
+        updated_params = {k: v for k, v in params.items()}
+        updated_params['embedding'] = embedding_params
+        
+        # Forward pass with updated parameters
+        outs = forward_fn.apply(updated_params, rng_key, batch)
         batch_embeddings = outs["embeddings_4"].mean(axis=1)
+        
+        # Compute loss
         loss, _ = compute_contrastive_loss(
             batch_embeddings,
             celltype_embeddings,
@@ -104,8 +111,12 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudob
         )
         return loss
     
-    # Compute gradients with respect to model parameters
-    grads = jax.grad(loss_fn)(params)
+    # Create zero gradients for all parameters
+    grads = create_zero_grads(params)
+    
+    # Compute gradients only for embedding layer
+    embedding_grads = jax.grad(loss_fn)(params['embedding'])
+    grads['embedding'] = embedding_grads
     
     # Update parameters using gradients
     updates, opt_state = optimizer.update(grads, opt_state, params)
