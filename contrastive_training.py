@@ -98,8 +98,8 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
                     celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
                     
                     # Get embeddings and reshape to match expected shape [64, 256]
-                    pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].reshape(-1, 256)
-                    celltype_embeddings = celltype_outs["embeddings_4"].reshape(-1, 256)
+                    pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=0).reshape(-1, 256)
+                    celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=0).reshape(-1, 256)
                     
                     def loss_fn(params):
                         # Forward pass for both batches
@@ -107,8 +107,8 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
                         celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
                         
                         # Get embeddings and reshape to match expected shape [64, 256]
-                        pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].reshape(-1, 256)
-                        celltype_embeddings = celltype_outs["embeddings_4"].reshape(-1, 256)
+                        pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=0).reshape(-1, 256)
+                        celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=0).reshape(-1, 256)
                         
                         # Compute contrastive loss in both directions
                         pseudobulk_loss, celltype_loss = compute_contrastive_loss(
