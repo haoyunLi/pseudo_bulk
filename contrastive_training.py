@@ -97,16 +97,18 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
                     pseudobulk_outs = forward_fn.apply(params, rng_key, pseudobulk_batch)
                     celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
                     
-                    pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=1)
-                    celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=1)
+                    # Use the embeddings directly from the pretrained model
+                    pseudobulk_embeddings = pseudobulk_outs["embeddings_4"]
+                    celltype_embeddings = celltype_outs["embeddings_4"]
                     
                     def loss_fn(params):
                         # Forward pass for both batches
                         pseudobulk_outs = forward_fn.apply(params, rng_key, pseudobulk_batch)
                         celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
                         
-                        pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=1)
-                        celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=1)
+                        # Use the embeddings directly from the pretrained model
+                        pseudobulk_embeddings = pseudobulk_outs["embeddings_4"]
+                        celltype_embeddings = celltype_outs["embeddings_4"]
                         
                         # Compute contrastive loss in both directions
                         pseudobulk_loss, celltype_loss = compute_contrastive_loss(
@@ -136,7 +138,7 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
                     logging.error(f"Error in sharded computation: {str(e)}")
                     raise
             
-            return sharded_compute  # Make sure to return the function
+            return sharded_compute
         
         # Create the sharded computation function
         sharded_compute = create_sharded_compute(forward_fn, optimizer)
