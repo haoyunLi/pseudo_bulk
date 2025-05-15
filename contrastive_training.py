@@ -47,101 +47,121 @@ def shard_params(params):
     """Shard parameters across devices."""
     def shard_param(param):
         if len(param.shape) > 1:  # Only shard parameters with multiple dimensions
-            # Shard along the last dimension instead of the first
-            # This is more likely to work with transformer parameters
-            last_dim = param.shape[-1]
-            if last_dim >= NUM_DEVICES:  # Only shard if last dimension is large enough
-                # Calculate the size of each shard
-                shard_size = (last_dim + NUM_DEVICES - 1) // NUM_DEVICES
-                
-                # Pad the parameter if necessary
-                if last_dim % NUM_DEVICES != 0:
-                    pad_size = shard_size * NUM_DEVICES - last_dim
-                    padding = [(0, 0)] * (len(param.shape) - 1) + [(0, pad_size)]
-                    param = jnp.pad(param, padding)
-                
-                # Split along the last dimension
-                return jax.device_put_sharded(
-                    jnp.split(param, NUM_DEVICES, axis=-1),
-                    devices
-                )
+            # For transformer parameters, shard along the hidden dimension
+            # This is typically the last dimension for weight matrices
+            if 'embeddings' in str(param):  # Special handling for embeddings
+                # Don't shard embeddings, they need to stay together
+                return param
+            elif 'attention' in str(param):  # Special handling for attention weights
+                # Shard attention weights along the last dimension
+                last_dim = param.shape[-1]
+                if last_dim >= NUM_DEVICES:
+                    shard_size = (last_dim + NUM_DEVICES - 1) // NUM_DEVICES
+                    if last_dim % NUM_DEVICES != 0:
+                        pad_size = shard_size * NUM_DEVICES - last_dim
+                        padding = [(0, 0)] * (len(param.shape) - 1) + [(0, pad_size)]
+                        param = jnp.pad(param, padding)
+                    return jax.device_put_sharded(
+                        jnp.split(param, NUM_DEVICES, axis=-1),
+                        devices
+                    )
+            else:  # For other parameters
+                # Try to shard along the largest dimension
+                dim_sizes = param.shape
+                max_dim = max(range(len(dim_sizes)), key=lambda i: dim_sizes[i])
+                if dim_sizes[max_dim] >= NUM_DEVICES:
+                    shard_size = (dim_sizes[max_dim] + NUM_DEVICES - 1) // NUM_DEVICES
+                    if dim_sizes[max_dim] % NUM_DEVICES != 0:
+                        pad_size = shard_size * NUM_DEVICES - dim_sizes[max_dim]
+                        padding = [(0, 0)] * max_dim + [(0, pad_size)] + [(0, 0)] * (len(param.shape) - max_dim - 1)
+                        param = jnp.pad(param, padding)
+                    return jax.device_put_sharded(
+                        jnp.split(param, NUM_DEVICES, axis=max_dim),
+                        devices
+                    )
         return param
     
     return jax.tree_map(shard_param, params)
 
 def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors, is_pseudobulk_phase=True):
     """Single training step computing contrastive loss for both modalities."""
-    # Shard parameters across devices
-    sharded_params = shard_params(params)
-    
-    # Create a closure that captures forward_fn and optimizer
-    def create_sharded_compute(forward_fn, optimizer):
-        def sharded_compute(params, opt_state, pseudobulk_batch, celltype_batch, rng_key, pseudobulk_donors, celltype_donors, is_pseudobulk_phase):
-            # Generate embeddings for both batches
-            pseudobulk_outs = forward_fn.apply(params, rng_key, pseudobulk_batch)
-            celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
-            
-            pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=1)
-            celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=1)
-            
-            def loss_fn(params):
-                # Forward pass for both batches
-                pseudobulk_outs = forward_fn.apply(params, rng_key, pseudobulk_batch)
-                celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
-                
-                pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=1)
-                celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=1)
-                
-                # Compute contrastive loss in both directions
-                pseudobulk_loss, celltype_loss = compute_contrastive_loss(
-                    pseudobulk_embeddings,
-                    celltype_embeddings,
-                    pseudobulk_donors,
-                    celltype_donors,
-                    is_training=True
-                )
-                
-                # Focus on the current phase's loss
-                if is_pseudobulk_phase:
-                    return pseudobulk_loss
-                else:
-                    return celltype_loss
-            
-            # Compute gradients
-            grad_fn = jax.value_and_grad(loss_fn)
-            (total_loss, grads) = grad_fn(params)
-            
-            # Update parameters
-            updates, opt_state = optimizer.update(grads, opt_state, params)
-            params = optax.apply_updates(params, updates)
-            
-            return params, opt_state, pseudobulk_embeddings, celltype_embeddings, total_loss
+    try:
+        # Shard parameters across devices
+        sharded_params = shard_params(params)
         
-        return sharded_compute
-    
-    # Create the sharded computation function
-    sharded_compute = create_sharded_compute(forward_fn, optimizer)
-    
-    # Create pjit function with sharding specs
-    sharded_train_step = pjit(
-        sharded_compute,
-        in_axis_resources=(param_spec, None, None, None, None, None, None, None),
-        out_axis_resources=(param_spec, None, None, None, None)
-    )
-    
-    # Execute sharded computation
-    with mesh:
-        params, opt_state, pseudobulk_embeddings, celltype_embeddings, total_loss = sharded_train_step(
-            sharded_params, opt_state,
-            pseudobulk_batch,
-            celltype_batch,
-            rng_key,
-            pseudobulk_donors,
-            celltype_donors,
-            is_pseudobulk_phase
+        # Create a closure that captures forward_fn and optimizer
+        def create_sharded_compute(forward_fn, optimizer):
+            def sharded_compute(params, opt_state, pseudobulk_batch, celltype_batch, rng_key, pseudobulk_donors, celltype_donors, is_pseudobulk_phase):
+                try:
+                    # Generate embeddings for both batches
+                    pseudobulk_outs = forward_fn.apply(params, rng_key, pseudobulk_batch)
+                    celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
+                    
+                    pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=1)
+                    celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=1)
+                    
+                    def loss_fn(params):
+                        # Forward pass for both batches
+                        pseudobulk_outs = forward_fn.apply(params, rng_key, pseudobulk_batch)
+                        celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
+                        
+                        pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=1)
+                        celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=1)
+                        
+                        # Compute contrastive loss in both directions
+                        pseudobulk_loss, celltype_loss = compute_contrastive_loss(
+                            pseudobulk_embeddings,
+                            celltype_embeddings,
+                            pseudobulk_donors,
+                            celltype_donors,
+                            is_training=True
+                        )
+                        
+                        # Focus on the current phase's loss
+                        if is_pseudobulk_phase:
+                            return pseudobulk_loss
+                        else:
+                            return celltype_loss
+                    
+                    # Compute gradients
+                    grad_fn = jax.value_and_grad(loss_fn)
+                    (total_loss, grads) = grad_fn(params)
+                    
+                    # Update parameters
+                    updates, opt_state = optimizer.update(grads, opt_state, params)
+                    params = optax.apply_updates(params, updates)
+                    
+                    return params, opt_state, pseudobulk_embeddings, celltype_embeddings, total_loss
+                except Exception as e:
+                    logging.error(f"Error in sharded computation: {str(e)}")
+                    raise
+        
+        # Create the sharded computation function
+        sharded_compute = create_sharded_compute(forward_fn, optimizer)
+        
+        # Create pjit function with sharding specs
+        sharded_train_step = pjit(
+            sharded_compute,
+            in_axis_resources=(param_spec, None, None, None, None, None, None, None),
+            out_axis_resources=(param_spec, None, None, None, None)
         )
-    
-    return params, opt_state, pseudobulk_embeddings, celltype_embeddings, total_loss
+        
+        # Execute sharded computation
+        with mesh:
+            params, opt_state, pseudobulk_embeddings, celltype_embeddings, total_loss = sharded_train_step(
+                sharded_params, opt_state,
+                pseudobulk_batch,
+                celltype_batch,
+                rng_key,
+                pseudobulk_donors,
+                celltype_donors,
+                is_pseudobulk_phase
+            )
+        
+        return params, opt_state, pseudobulk_embeddings, celltype_embeddings, total_loss
+    except Exception as e:
+        logging.error(f"Error in train step: {str(e)}")
+        raise
 
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     """Load and preprocess both pseudobulk and celltype-specific data."""
