@@ -58,9 +58,17 @@ def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     celltype_df = celltype_df.apply(pd.to_numeric, errors='coerce')
     celltype_df = celltype_df.fillna(0)
     
-    # Extract donor IDs from celltype data index
+    # Extract donor IDs and convert to numeric indices
     celltype_donors = [idx.split('|')[1] for idx in celltype_df.index]
     pseudobulk_donors = pseudobulk_df.index.tolist()
+    
+    # Create mapping dictionaries for donor IDs to numeric indices
+    unique_donors = list(set(pseudobulk_donors + celltype_donors))
+    donor_to_idx = {donor: idx for idx, donor in enumerate(unique_donors)}
+    
+    # Convert donor IDs to numeric indices
+    pseudobulk_donor_indices = jnp.array([donor_to_idx[donor] for donor in pseudobulk_donors], dtype=jnp.int32)
+    celltype_donor_indices = jnp.array([donor_to_idx[donor] for donor in celltype_donors], dtype=jnp.int32)
     
     # Preprocess data for the model
     logging.info("Preprocessing data for model...")
@@ -72,17 +80,20 @@ def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     pseudobulk_tokens = jnp.asarray(tokenizer.batch_tokenize(pseudobulk_array), dtype=jnp.int32)
     celltype_tokens = jnp.asarray(tokenizer.batch_tokenize(celltype_array), dtype=jnp.int32)
     
-    # Log data shapes
+    # Log data shapes and sample counts
     logging.info(f"Pseudobulk data shape: {pseudobulk_df.shape}")
     logging.info(f"Celltype data shape: {celltype_df.shape}")
+    logging.info(f"Number of pseudobulk samples: {len(pseudobulk_tokens)}")
+    logging.info(f"Number of celltype samples: {len(celltype_tokens)}")
     
-    return pseudobulk_tokens, celltype_tokens, pseudobulk_donors, celltype_donors
+    return pseudobulk_tokens, celltype_tokens, pseudobulk_donor_indices, celltype_donor_indices
 
 def create_batches(tokens, batch_size):
     """Create batches from tokens."""
     num_samples = len(tokens)
     for i in range(0, num_samples, batch_size):
-        yield tokens[i:i + batch_size]
+        end_idx = min(i + batch_size, num_samples)
+        yield tokens[i:end_idx]
 
 def clear_memory():
     """Aggressive memory clearing function."""
@@ -179,6 +190,12 @@ def train(params, forward_fn, tokenizer, config, num_epochs=50, batch_size=1, le
             tokenizer
         )
         
+        # Calculate total number of batches
+        num_pseudobulk_batches = (len(pseudobulk_tokens) + batch_size - 1) // batch_size
+        num_celltype_batches = (len(celltype_tokens) + batch_size - 1) // batch_size
+        logging.info(f"Number of pseudobulk batches: {num_pseudobulk_batches}")
+        logging.info(f"Number of celltype batches: {num_celltype_batches}")
+        
         # Training history
         history = {
             'epoch': [],
@@ -199,10 +216,6 @@ def train(params, forward_fn, tokenizer, config, num_epochs=50, batch_size=1, le
         min_delta = 1e-4  # Minimum change in loss to be considered as improvement
         no_improvement_count = 0
         
-        # Create batches
-        pseudobulk_batches = create_batches(pseudobulk_tokens, batch_size)
-        celltype_batches = create_batches(celltype_tokens, batch_size)
-        
         # Training loop
         for epoch in range(num_epochs):
             try:
@@ -214,19 +227,38 @@ def train(params, forward_fn, tokenizer, config, num_epochs=50, batch_size=1, le
                     epoch_celltype_loss = 0
                     num_batches = 0
                     
+                    # Determine number of batches for current phase
+                    num_batches_phase = num_pseudobulk_batches if is_pseudobulk_phase else num_celltype_batches
+                    
                     # Process batches
-                    for i, (pseudobulk_batch, celltype_batch) in enumerate(zip(pseudobulk_batches, celltype_batches)):
+                    for i in range(num_batches_phase):
                         try:
                             rng_key = jax.random.PRNGKey(epoch * 1000 + i)
+                            
+                            # Get current batch
+                            batch_start = i * batch_size
+                            batch_end = min((i + 1) * batch_size, len(pseudobulk_tokens) if is_pseudobulk_phase else len(celltype_tokens))
+                            
+                            # Get batch data
+                            if is_pseudobulk_phase:
+                                current_batch = pseudobulk_tokens[batch_start:batch_end]
+                                current_donors = pseudobulk_donors[batch_start:batch_end]
+                                other_batch = celltype_tokens[batch_start:batch_end]
+                                other_donors = celltype_donors[batch_start:batch_end]
+                            else:
+                                current_batch = celltype_tokens[batch_start:batch_end]
+                                current_donors = celltype_donors[batch_start:batch_end]
+                                other_batch = pseudobulk_tokens[batch_start:batch_end]
+                                other_donors = pseudobulk_donors[batch_start:batch_end]
                             
                             # Training step
                             params, opt_state, pseudobulk_embeddings, celltype_embeddings, batch_loss = train_step(
                                 params, opt_state,
-                                pseudobulk_batch,
-                                celltype_batch,
+                                current_batch,
+                                other_batch,
                                 forward_fn, optimizer, rng_key,
-                                pseudobulk_donors[i:i + batch_size],
-                                celltype_donors[i:i + batch_size],
+                                current_donors,
+                                other_donors,
                                 is_pseudobulk_phase
                             )
                             
@@ -238,8 +270,8 @@ def train(params, forward_fn, tokenizer, config, num_epochs=50, batch_size=1, le
                             pseudobulk_loss, celltype_loss = compute_contrastive_loss(
                                 pseudobulk_embeddings,
                                 celltype_embeddings,
-                                pseudobulk_donors[i:i + batch_size],
-                                celltype_donors[i:i + batch_size],
+                                current_donors,
+                                other_donors,
                                 is_training=False
                             )
                             
@@ -254,6 +286,11 @@ def train(params, forward_fn, tokenizer, config, num_epochs=50, batch_size=1, le
                         except Exception as e:
                             logging.error(f"Error in batch {i} of epoch {epoch + 1}, phase {phase}: {str(e)}")
                             continue
+                    
+                    # Skip epoch if no successful batches
+                    if num_batches == 0:
+                        logging.error(f"No successful batches in epoch {epoch + 1}, phase {phase}")
+                        continue
                     
                     # Compute average epoch losses
                     avg_epoch_loss = epoch_loss / num_batches
