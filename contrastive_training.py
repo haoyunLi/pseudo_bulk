@@ -44,6 +44,18 @@ mesh_shape = (NUM_DEVICES,)
 param_spec = P('model')  # Parameters are sharded across model dimension
 batch_spec = P('model')  # Batch dimension is sharded across model dimension
 
+def shard_params(params):
+    """Shard parameters across devices."""
+    def shard_param(param):
+        if len(param.shape) > 1:  # Only shard parameters with multiple dimensions
+            return jax.device_put_sharded(
+                jnp.split(param, NUM_DEVICES, axis=0),
+                devices
+            )
+        return param
+    
+    return jax.tree_map(shard_param, params)
+
 def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     """Load and preprocess both pseudobulk and celltype-specific data."""
     # Load pseudobulk data
@@ -103,6 +115,9 @@ def clear_memory():
 
 def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors, is_pseudobulk_phase=True):
     """Single training step computing contrastive loss for both modalities."""
+    # Shard parameters across devices
+    sharded_params = shard_params(params)
+    
     # Create a closure that captures forward_fn and optimizer
     def create_sharded_compute(forward_fn, optimizer):
         def sharded_compute(params, opt_state, pseudobulk_batch, celltype_batch, rng_key, pseudobulk_donors, celltype_donors, is_pseudobulk_phase):
@@ -161,7 +176,7 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
     # Execute sharded computation
     with mesh:
         params, opt_state, pseudobulk_embeddings, celltype_embeddings, total_loss = sharded_train_step(
-            params, opt_state,
+            sharded_params, opt_state,
             pseudobulk_batch,
             celltype_batch,
             rng_key,
