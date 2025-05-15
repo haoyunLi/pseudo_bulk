@@ -93,7 +93,7 @@ def clear_memory():
 def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors):
     """Single training step computing contrastive loss for both modalities."""
     # Define the sharded computation
-    def sharded_compute(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors):
+    def sharded_compute(params, opt_state, pseudobulk_batch, celltype_batch, optimizer, rng_key, pseudobulk_donors, celltype_donors):
         # Generate embeddings for both batches
         pseudobulk_outs = forward_fn.apply(params, rng_key, pseudobulk_batch)
         celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
@@ -134,7 +134,7 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
     # Create pjit function with sharding specs
     sharded_train_step = pjit(
         sharded_compute,
-        in_axis_resources=(param_spec, None, batch_spec, batch_spec, None, None, None, None, None),
+        in_axis_resources=(param_spec, None, batch_spec, batch_spec, None, None, None, None),
         out_axis_resources=(param_spec, None, batch_spec, batch_spec, None)
     )
     
@@ -144,7 +144,7 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
             params, opt_state,
             pseudobulk_batch,
             celltype_batch,
-            forward_fn, optimizer, rng_key,
+            optimizer, rng_key,
             pseudobulk_donors,
             celltype_donors
         )
