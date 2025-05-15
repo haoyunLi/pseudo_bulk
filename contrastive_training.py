@@ -41,10 +41,39 @@ mesh = Mesh(np.array(devices).reshape(-1), ('model',))
 mesh_shape = (NUM_DEVICES,)
 
 # Define partition specs
-batch_spec = P('model')  # Batch dimension is sharded across model dimension
+param_spec = P('model')  # Parameters are sharded across model dimension
+
+def shard_params(params):
+    """Shard parameters across devices."""
+    def shard_param(param):
+        if len(param.shape) > 1:  # Only shard parameters with multiple dimensions
+            # Shard along the last dimension instead of the first
+            # This is more likely to work with transformer parameters
+            last_dim = param.shape[-1]
+            if last_dim >= NUM_DEVICES:  # Only shard if last dimension is large enough
+                # Calculate the size of each shard
+                shard_size = (last_dim + NUM_DEVICES - 1) // NUM_DEVICES
+                
+                # Pad the parameter if necessary
+                if last_dim % NUM_DEVICES != 0:
+                    pad_size = shard_size * NUM_DEVICES - last_dim
+                    padding = [(0, 0)] * (len(param.shape) - 1) + [(0, pad_size)]
+                    param = jnp.pad(param, padding)
+                
+                # Split along the last dimension
+                return jax.device_put_sharded(
+                    jnp.split(param, NUM_DEVICES, axis=-1),
+                    devices
+                )
+        return param
+    
+    return jax.tree_map(shard_param, params)
 
 def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors, is_pseudobulk_phase=True):
     """Single training step computing contrastive loss for both modalities."""
+    # Shard parameters across devices
+    sharded_params = shard_params(params)
+    
     # Create a closure that captures forward_fn and optimizer
     def create_sharded_compute(forward_fn, optimizer):
         def sharded_compute(params, opt_state, pseudobulk_batch, celltype_batch, rng_key, pseudobulk_donors, celltype_donors, is_pseudobulk_phase):
@@ -96,14 +125,14 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
     # Create pjit function with sharding specs
     sharded_train_step = pjit(
         sharded_compute,
-        in_axis_resources=(None, None, batch_spec, batch_spec, None, None, None, None),
-        out_axis_resources=(None, None, batch_spec, batch_spec, None)
+        in_axis_resources=(param_spec, None, None, None, None, None, None, None),
+        out_axis_resources=(param_spec, None, None, None, None)
     )
     
     # Execute sharded computation
     with mesh:
         params, opt_state, pseudobulk_embeddings, celltype_embeddings, total_loss = sharded_train_step(
-            params, opt_state,
+            sharded_params, opt_state,
             pseudobulk_batch,
             celltype_batch,
             rng_key,
