@@ -135,6 +135,8 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
                 except Exception as e:
                     logging.error(f"Error in sharded computation: {str(e)}")
                     raise
+            
+            return sharded_compute  # Make sure to return the function
         
         # Create the sharded computation function
         sharded_compute = create_sharded_compute(forward_fn, optimizer)
