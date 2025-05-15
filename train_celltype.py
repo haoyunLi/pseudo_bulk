@@ -8,7 +8,7 @@ import haiku as hk
 import pandas as pd
 from multiomics_open_research.bulk_rna_bert.pretrained import get_pretrained_model
 from multiomics_open_research.bulk_rna_bert.preprocess import preprocess_rna_seq_for_bulkrnabert
-from contrastive_loss import compute_contrastive_loss
+from contrastive_loss import compute_contrastive_loss, compute_gradients
 
 # Configure logging
 logging.basicConfig(
@@ -81,7 +81,7 @@ def create_zero_grads(params):
 
 def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors):
     """Single training step."""
-    # Generate embeddings for the current batch
+    # Generate embeddings for current batch
     outs = forward_fn.apply(params, rng_key, batch)
     batch_embeddings = outs["embeddings_4"].mean(axis=1)
     
@@ -91,32 +91,25 @@ def train_step(params, opt_state, batch, forward_fn, optimizer, rng_key, pseudob
     else:
         pseudobulk_embeddings = np.load(f'embeddings/pseudobulk_embeddings_round_{ROUND-1}.npy')
     
-    # Define loss function that takes only embedding parameters as input
-    def loss_fn(embedding_params):
-        # Create a copy of params with updated embedding parameters
-        updated_params = {k: v for k, v in params.items()}
-        updated_params['token_embedding'] = embedding_params  # Changed from 'embedding' to 'token_embedding'
-        
-        # Forward pass with updated parameters
-        outs = forward_fn.apply(updated_params, rng_key, batch)
+    # Define loss function that focuses on celltype embeddings
+    def loss_fn(params):
+        # Forward pass for current batch
+        outs = forward_fn.apply(params, rng_key, batch)
         batch_embeddings = outs["embeddings_4"].mean(axis=1)
         
-        # Compute loss
-        _, loss = compute_contrastive_loss(
+        # Compute loss focusing on celltype direction
+        _, celltype_loss = compute_contrastive_loss(
             pseudobulk_embeddings,
             batch_embeddings,
             pseudobulk_donors,
             celltype_donors,
             is_training=True
         )
-        return loss
+        return celltype_loss  # Only use celltype loss for optimization
     
-    # Create zero gradients for all parameters
-    grads = create_zero_grads(params)
-    
-    # Compute gradients only for embedding layer
-    embedding_grads = jax.grad(loss_fn)(params['token_embedding'])  # Changed from 'embedding' to 'token_embedding'
-    grads['token_embedding'] = embedding_grads  # Changed from 'embedding' to 'token_embedding'
+    # Compute gradients with respect to all parameters
+    grad_fn = jax.value_and_grad(loss_fn)
+    (total_loss, grads) = grad_fn(params)
     
     # Update parameters using gradients
     updates, opt_state = optimizer.update(grads, opt_state, params)

@@ -125,24 +125,50 @@ def compute_contrastive_loss(pseudobulk_embeddings, celltype_embeddings, pseudob
     
     return pseudobulk_loss, celltype_loss
 
-def compute_gradients(loss_fn, params, pseudobulk_embeddings, celltype_embeddings):
+def compute_gradients(loss_fn, params, pseudobulk_embeddings, celltype_embeddings, pseudobulk_donors, celltype_donors):
     """
-    Compute gradients of the contrastive loss with respect to the embeddings.
+    Compute gradients of the contrastive loss with respect to the model parameters.
     
     Args:
         loss_fn: Function that computes the contrastive loss
         params: Model parameters
         pseudobulk_embeddings: Embeddings from pseudobulk data
         celltype_embeddings: Embeddings from celltype-specific data
+        pseudobulk_donors: Donor IDs for pseudobulk samples
+        celltype_donors: Donor IDs for celltype samples
         
     Returns:
-        Tuple of (pseudobulk_loss, celltype_loss, pseudobulk_grads, celltype_grads)
+        Tuple of (pseudobulk_loss, celltype_loss, grads)
     """
-    grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 1))
-    ((pseudobulk_loss, celltype_loss), (pseudobulk_grads, celltype_grads)) = grad_fn(
-        pseudobulk_embeddings, celltype_embeddings
+    def loss_wrapper(params):
+        # Forward pass to get embeddings
+        pseudobulk_outs = loss_fn.apply(params, pseudobulk_embeddings)
+        celltype_outs = loss_fn.apply(params, celltype_embeddings)
+        
+        # Compute contrastive loss
+        pseudobulk_loss, celltype_loss = compute_contrastive_loss(
+            pseudobulk_outs["embeddings_4"].mean(axis=1),
+            celltype_outs["embeddings_4"].mean(axis=1),
+            pseudobulk_donors,
+            celltype_donors,
+            is_training=True
+        )
+        return pseudobulk_loss + celltype_loss
+    
+    # Compute gradients with respect to all parameters
+    grad_fn = jax.value_and_grad(loss_wrapper)
+    (total_loss, grads) = grad_fn(params)
+    
+    # Split total loss back into components for logging
+    pseudobulk_loss, celltype_loss = compute_contrastive_loss(
+        pseudobulk_embeddings,
+        celltype_embeddings,
+        pseudobulk_donors,
+        celltype_donors,
+        is_training=False
     )
-    return pseudobulk_loss, celltype_loss, pseudobulk_grads, celltype_grads
+    
+    return pseudobulk_loss, celltype_loss, grads
 
 def main():
     # Create directory for losses
