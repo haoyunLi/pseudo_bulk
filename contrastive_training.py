@@ -42,6 +42,7 @@ mesh_shape = (NUM_DEVICES,)
 
 # Define partition specs
 param_spec = P('model')  # Parameters are sharded across model dimension
+batch_spec = P(None)     # Batch dimension is not sharded
 
 def shard_params(params):
     """Shard parameters across devices."""
@@ -146,7 +147,7 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
         # Create pjit function with sharding specs
         sharded_train_step = pjit(
             sharded_compute,
-            in_axis_resources=(param_spec, None, None, None, None, None, None, None),
+            in_axis_resources=(param_spec, None, batch_spec, batch_spec, None, None, None, None),
             out_axis_resources=(param_spec, None, None, None, None)
         )
         
