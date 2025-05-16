@@ -53,20 +53,7 @@ def shard_params(params):
             if 'embeddings' in str(param):  # Special handling for embeddings
                 # Don't shard embeddings, they need to stay together
                 return param
-            elif 'attention' in str(param):  # Special handling for attention weights
-                # Shard attention weights along the last dimension
-                last_dim = param.shape[-1]
-                if last_dim >= NUM_DEVICES:
-                    shard_size = (last_dim + NUM_DEVICES - 1) // NUM_DEVICES
-                    if last_dim % NUM_DEVICES != 0:
-                        pad_size = shard_size * NUM_DEVICES - last_dim
-                        padding = [(0, 0)] * (len(param.shape) - 1) + [(0, pad_size)]
-                        param = jnp.pad(param, padding)
-                    return jax.device_put_sharded(
-                        jnp.split(param, NUM_DEVICES, axis=-1),
-                        devices
-                    )
-            else:  # For other parameters
+            else:  # For all other parameters
                 # Try to shard along the largest dimension
                 dim_sizes = param.shape
                 max_dim = max(range(len(dim_sizes)), key=lambda i: dim_sizes[i])
@@ -99,8 +86,13 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
                     celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
                     
                     # Get embeddings and reshape to match expected shape [64, 256]
-                    pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=0).reshape(-1, 256)
-                    celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=0).reshape(-1, 256)
+                    # First take mean across attention heads, then handle sequence length
+                    pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=0)  # Shape: (64, 64)
+                    celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=0)      # Shape: (64, 64)
+                    
+                    # Now reshape to match expected shape
+                    pseudobulk_embeddings = pseudobulk_embeddings.reshape(64, -1)  # Shape: (64, 64)
+                    celltype_embeddings = celltype_embeddings.reshape(64, -1)      # Shape: (64, 64)
                     
                     def loss_fn(params):
                         # Forward pass for both batches
@@ -108,8 +100,12 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
                         celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
                         
                         # Get embeddings and reshape to match expected shape [64, 256]
-                        pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=0).reshape(-1, 256)
-                        celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=0).reshape(-1, 256)
+                        pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=0)  # Shape: (64, 64)
+                        celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=0)      # Shape: (64, 64)
+                        
+                        # Now reshape to match expected shape
+                        pseudobulk_embeddings = pseudobulk_embeddings.reshape(64, -1)  # Shape: (64, 64)
+                        celltype_embeddings = celltype_embeddings.reshape(64, -1)      # Shape: (64, 64)
                         
                         # Compute contrastive loss in both directions
                         pseudobulk_loss, celltype_loss = compute_contrastive_loss(
