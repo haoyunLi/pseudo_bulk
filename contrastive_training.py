@@ -5,15 +5,14 @@ import pandas as pd
 import numpy as np
 from multiomics_open_research.bulk_rna_bert.pretrained import get_pretrained_model
 from multiomics_open_research.bulk_rna_bert.preprocess import preprocess_rna_seq_for_bulkrnabert
-from contrastive_loss import compute_contrastive_loss
-import gc
+import optax
 import logging
 import os
-import optax
 import pickle
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Mesh
 from jax.experimental.pjit import pjit
+import gc
 
 # Configure logging
 logging.basicConfig(
@@ -44,13 +43,45 @@ mesh_shape = (NUM_DEVICES,)
 param_spec = P('model')  # Parameters are sharded across model dimension
 batch_spec = P(None)     # Batch dimension is not sharded
 
+def compute_contrastive_loss(embeddings1, embeddings2, labels1, labels2, temperature=0.07):
+    """
+    Compute contrastive loss between two sets of embeddings.
+    
+    Args:
+        embeddings1: First set of embeddings (pseudobulk)
+        embeddings2: Second set of embeddings (celltype)
+        labels1: Labels for first set (donor IDs)
+        labels2: Labels for second set (donor IDs)
+        temperature: Temperature parameter for softmax
+    
+    Returns:
+        loss: Contrastive loss value
+    """
+    # Normalize embeddings
+    embeddings1 = embeddings1 / jnp.linalg.norm(embeddings1, axis=1, keepdims=True)
+    embeddings2 = embeddings2 / jnp.linalg.norm(embeddings2, axis=1, keepdims=True)
+    
+    # Compute similarity matrix
+    similarity_matrix = jnp.matmul(embeddings1, embeddings2.T) / temperature
+    
+    # Create positive mask (same donor)
+    positive_mask = jnp.equal(labels1[:, None], labels2[None, :])
+    
+    # Compute loss
+    exp_sim = jnp.exp(similarity_matrix)
+    positive_sim = jnp.sum(exp_sim * positive_mask, axis=1)
+    negative_sim = jnp.sum(exp_sim * (1 - positive_mask), axis=1)
+    
+    loss = -jnp.mean(jnp.log(positive_sim / (positive_sim + negative_sim + 1e-8)))
+    
+    return loss
+
 def shard_params(params):
     """Shard parameters across devices."""
     def shard_param(param):
         if len(param.shape) > 1:  # Only shard parameters with multiple dimensions
             # For transformer parameters, shard along the hidden dimension
             if 'embeddings' in str(param):  # Special handling for embeddings
-                # Don't shard embeddings, they need to stay together
                 return param
             else:  # For all other parameters
                 # Try to shard along the largest dimension
@@ -71,88 +102,41 @@ def shard_params(params):
     
     return jax.tree_map(shard_param, params)
 
-def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors, is_pseudobulk_phase=True):
+def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors):
     """Single training step computing contrastive loss for both modalities."""
     try:
         # Shard parameters across devices
         sharded_params = shard_params(params)
         
-        # Create a closure that captures forward_fn and optimizer
-        def create_sharded_compute(forward_fn, optimizer):
-            def sharded_compute(params, opt_state, pseudobulk_batch, celltype_batch, rng_key, pseudobulk_donors, celltype_donors, is_pseudobulk_phase):
-                try:
-                    # Generate embeddings for both batches
-                    pseudobulk_outs = forward_fn.apply(params, rng_key, pseudobulk_batch)
-                    celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
-                    
-                    # Get embeddings and handle dimensions properly
-                    # Shape: (4, 64, 64) -> (64,)
-                    pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=(0, 1))  # Average across attention heads and sequence length
-                    celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=(0, 1))      # Average across attention heads and sequence length
-                    
-                    def loss_fn(params):
-                        # Forward pass for both batches
-                        pseudobulk_outs = forward_fn.apply(params, rng_key, pseudobulk_batch)
-                        celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
-                        
-                        # Get embeddings and handle dimensions properly
-                        # Shape: (4, 64, 64) -> (64,)
-                        pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=(0, 1))  # Average across attention heads and sequence length
-                        celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=(0, 1))      # Average across attention heads and sequence length
-                        
-                        # Compute contrastive loss in both directions
-                        pseudobulk_loss, celltype_loss = compute_contrastive_loss(
-                            pseudobulk_embeddings,
-                            celltype_embeddings,
-                            pseudobulk_donors,
-                            celltype_donors,
-                            is_training=True
-                        )
-                        
-                        # Focus on the current phase's loss
-                        if is_pseudobulk_phase:
-                            return pseudobulk_loss
-                        else:
-                            return celltype_loss
-                    
-                    # Compute gradients
-                    grad_fn = jax.value_and_grad(loss_fn)
-                    (total_loss, grads) = grad_fn(params)
-                    
-                    # Update parameters
-                    updates, opt_state = optimizer.update(grads, opt_state, params)
-                    params = optax.apply_updates(params, updates)
-                    
-                    return params, opt_state, pseudobulk_embeddings, celltype_embeddings, total_loss
-                except Exception as e:
-                    logging.error(f"Error in sharded computation: {str(e)}")
-                    raise
+        def loss_fn(params):
+            # Forward pass for both batches
+            pseudobulk_outs = forward_fn.apply(params, rng_key, pseudobulk_batch)
+            celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
             
-            return sharded_compute
-        
-        # Create the sharded computation function
-        sharded_compute = create_sharded_compute(forward_fn, optimizer)
-        
-        # Create pjit function with sharding specs
-        sharded_train_step = pjit(
-            sharded_compute,
-            in_axis_resources=(param_spec, None, None, None, None, None, None, None),  # Only shard parameters
-            out_axis_resources=(param_spec, None, None, None, None)
-        )
-        
-        # Execute sharded computation
-        with mesh:
-            params, opt_state, pseudobulk_embeddings, celltype_embeddings, total_loss = sharded_train_step(
-                sharded_params, opt_state,
-                pseudobulk_batch,
-                celltype_batch,
-                rng_key,
+            # Get embeddings and handle dimensions properly
+            pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=(0, 1))  # Average across attention heads and sequence length
+            celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=(0, 1))      # Average across attention heads and sequence length
+            
+            # Compute contrastive loss
+            loss = compute_contrastive_loss(
+                pseudobulk_embeddings,
+                celltype_embeddings,
                 pseudobulk_donors,
-                celltype_donors,
-                is_pseudobulk_phase
+                celltype_donors
             )
+            
+            return loss, (pseudobulk_embeddings, celltype_embeddings)
         
-        return params, opt_state, pseudobulk_embeddings, celltype_embeddings, total_loss
+        # Compute gradients
+        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+        (loss, (pseudobulk_embeddings, celltype_embeddings)), grads = grad_fn(params)
+        
+        # Update parameters
+        updates, opt_state = optimizer.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+        
+        return params, opt_state, pseudobulk_embeddings, celltype_embeddings, loss
+    
     except Exception as e:
         logging.error(f"Error in train step: {str(e)}")
         raise
@@ -248,27 +232,22 @@ def train(params, forward_fn, tokenizer, config, num_epochs=50, batch_size=1, le
         )
         
         # Calculate total number of batches
-        num_pseudobulk_batches = (len(pseudobulk_tokens) + batch_size - 1) // batch_size
-        num_celltype_batches = (len(celltype_tokens) + batch_size - 1) // batch_size
-        logging.info(f"Number of pseudobulk batches: {num_pseudobulk_batches}")
-        logging.info(f"Number of celltype batches: {num_celltype_batches}")
+        num_batches = min(
+            (len(pseudobulk_tokens) + batch_size - 1) // batch_size,
+            (len(celltype_tokens) + batch_size - 1) // batch_size
+        )
+        logging.info(f"Number of batches per epoch: {num_batches}")
         
         # Training history
         history = {
             'epoch': [],
-            'phase': [],
             'loss': [],
-            'pseudobulk_loss': [],
-            'celltype_loss': [],
-            'best_pseudobulk_loss': [],
-            'best_celltype_loss': []
+            'best_loss': []
         }
         
         # Early stopping variables
-        best_pseudobulk_loss = float('inf')
-        best_celltype_loss = float('inf')
-        best_pseudobulk_params = None
-        best_celltype_params = None
+        best_loss = float('inf')
+        best_params = None
         patience = 5  # Number of epochs to wait for improvement
         min_delta = 1e-4  # Minimum change in loss to be considered as improvement
         no_improvement_count = 0
@@ -276,139 +255,91 @@ def train(params, forward_fn, tokenizer, config, num_epochs=50, batch_size=1, le
         # Training loop
         for epoch in range(num_epochs):
             try:
-                # Alternate between pseudobulk and celltype phases
-                for phase in ['pseudobulk', 'celltype']:
-                    is_pseudobulk_phase = (phase == 'pseudobulk')
-                    epoch_loss = 0
-                    epoch_pseudobulk_loss = 0
-                    epoch_celltype_loss = 0
-                    num_batches = 0
-                    
-                    # Determine number of batches for current phase
-                    num_batches_phase = num_pseudobulk_batches if is_pseudobulk_phase else num_celltype_batches
-                    
-                    # Process batches
-                    for i in range(num_batches_phase):
-                        try:
-                            rng_key = jax.random.PRNGKey(epoch * 1000 + i)
-                            
-                            # Get current batch
-                            batch_start = i * batch_size
-                            batch_end = min((i + 1) * batch_size, len(pseudobulk_tokens) if is_pseudobulk_phase else len(celltype_tokens))
-                            
-                            # Get batch data
-                            if is_pseudobulk_phase:
-                                current_batch = pseudobulk_tokens[batch_start:batch_end]
-                                current_donors = pseudobulk_donors[batch_start:batch_end]
-                                other_batch = celltype_tokens[batch_start:batch_end]
-                                other_donors = celltype_donors[batch_start:batch_end]
-                            else:
-                                current_batch = celltype_tokens[batch_start:batch_end]
-                                current_donors = celltype_donors[batch_start:batch_end]
-                                other_batch = pseudobulk_tokens[batch_start:batch_end]
-                                other_donors = pseudobulk_donors[batch_start:batch_end]
-                            
-                            # Training step
-                            params, opt_state, pseudobulk_embeddings, celltype_embeddings, batch_loss = train_step(
-                                params, opt_state,
-                                current_batch,
-                                other_batch,
-                                forward_fn, optimizer, rng_key,
-                                current_donors,
-                                other_donors,
-                                is_pseudobulk_phase
-                            )
-                            
-                            # Save embeddings
-                            np.save(f'embeddings/pseudobulk_embeddings_epoch_{epoch}_phase_{phase}_batch_{i}.npy', np.array(pseudobulk_embeddings))
-                            np.save(f'embeddings/celltype_embeddings_epoch_{epoch}_phase_{phase}_batch_{i}.npy', np.array(celltype_embeddings))
-                            
-                            # Compute separate losses for pseudobulk and celltype
-                            pseudobulk_loss, celltype_loss = compute_contrastive_loss(
-                                pseudobulk_embeddings,
-                                celltype_embeddings,
-                                current_donors,
-                                other_donors,
-                                is_training=False
-                            )
-                            
-                            epoch_loss += float(batch_loss)
-                            epoch_pseudobulk_loss += float(pseudobulk_loss)
-                            epoch_celltype_loss += float(celltype_loss)
-                            num_batches += 1
-                            
-                            # Clear memory after each batch
-                            clear_memory()
-                            
-                        except Exception as e:
-                            logging.error(f"Error in batch {i} of epoch {epoch + 1}, phase {phase}: {str(e)}")
-                            continue
-                    
-                    # Skip epoch if no successful batches
-                    if num_batches == 0:
-                        logging.error(f"No successful batches in epoch {epoch + 1}, phase {phase}")
-                        continue
-                    
-                    # Compute average epoch losses
-                    avg_epoch_loss = epoch_loss / num_batches
-                    avg_pseudobulk_loss = epoch_pseudobulk_loss / num_batches
-                    avg_celltype_loss = epoch_celltype_loss / num_batches
-                    
-                    # Update history
-                    history['epoch'].append(epoch + 1)
-                    history['phase'].append(phase)
-                    history['loss'].append(avg_epoch_loss)
-                    history['pseudobulk_loss'].append(avg_pseudobulk_loss)
-                    history['celltype_loss'].append(avg_celltype_loss)
-                    history['best_pseudobulk_loss'].append(min(avg_pseudobulk_loss, best_pseudobulk_loss))
-                    history['best_celltype_loss'].append(min(avg_celltype_loss, best_celltype_loss))
-                    
-                    # Log progress
-                    logging.info(f"Epoch {epoch + 1}/{num_epochs}, Phase: {phase}")
-                    logging.info(f"Total Loss: {avg_epoch_loss:.4f}, Pseudobulk Loss: {avg_pseudobulk_loss:.4f}, Celltype Loss: {avg_celltype_loss:.4f}")
-                    
-                    # Save best models for each phase
-                    if is_pseudobulk_phase and avg_pseudobulk_loss < (best_pseudobulk_loss - min_delta):
-                        best_pseudobulk_loss = avg_pseudobulk_loss
-                        best_pseudobulk_params = params
-                        pseudobulk_checkpoint = "checkpoints/best_pseudobulk_model.pkl"
-                        with open(pseudobulk_checkpoint, 'wb') as f:
-                            pickle.dump({
-                                'params': params,
-                                'loss': avg_pseudobulk_loss
-                            }, f)
-                        logging.info(f"Saved new best pseudobulk model with loss: {best_pseudobulk_loss:.4f}")
-                        no_improvement_count = 0
-                    elif not is_pseudobulk_phase and avg_celltype_loss < (best_celltype_loss - min_delta):
-                        best_celltype_loss = avg_celltype_loss
-                        best_celltype_params = params
-                        celltype_checkpoint = "checkpoints/best_celltype_model.pkl"
-                        with open(celltype_checkpoint, 'wb') as f:
-                            pickle.dump({
-                                'params': params,
-                                'loss': avg_celltype_loss
-                            }, f)
-                        logging.info(f"Saved new best celltype model with loss: {best_celltype_loss:.4f}")
-                        no_improvement_count = 0
-                    else:
-                        no_improvement_count += 1
-                        if no_improvement_count >= patience:
-                            logging.info(f"Early stopping triggered after {epoch + 1} epochs")
-                            break
-                    
-                    # Save checkpoints every 5 epochs
-                    if (epoch + 1) % 5 == 0:
-                        checkpoint_path = f"checkpoints/epoch_{epoch + 1}_phase_{phase}.pkl"
-                        with open(checkpoint_path, 'wb') as f:
-                            pickle.dump({
-                                'params': params,
-                                'pseudobulk_loss': avg_pseudobulk_loss,
-                                'celltype_loss': avg_celltype_loss
-                            }, f)
-                        logging.info(f"Saved checkpoint for epoch {epoch + 1}, phase {phase}")
+                epoch_loss = 0
+                num_batches_processed = 0
                 
-                if no_improvement_count >= patience:
-                    break
+                # Process batches
+                for i in range(num_batches):
+                    try:
+                        rng_key = jax.random.PRNGKey(epoch * 1000 + i)
+                        
+                        # Get current batch
+                        batch_start = i * batch_size
+                        batch_end = min((i + 1) * batch_size, len(pseudobulk_tokens))
+                        
+                        # Get batch data
+                        pseudobulk_batch = pseudobulk_tokens[batch_start:batch_end]
+                        celltype_batch = celltype_tokens[batch_start:batch_end]
+                        pseudobulk_batch_donors = pseudobulk_donors[batch_start:batch_end]
+                        celltype_batch_donors = celltype_donors[batch_start:batch_end]
+                        
+                        # Training step
+                        params, opt_state, pseudobulk_embeddings, celltype_embeddings, batch_loss = train_step(
+                            params, opt_state,
+                            pseudobulk_batch,
+                            celltype_batch,
+                            forward_fn, optimizer, rng_key,
+                            pseudobulk_batch_donors,
+                            celltype_batch_donors
+                        )
+                        
+                        # Save embeddings
+                        np.save(f'embeddings/pseudobulk_embeddings_epoch_{epoch}_batch_{i}.npy', np.array(pseudobulk_embeddings))
+                        np.save(f'embeddings/celltype_embeddings_epoch_{epoch}_batch_{i}.npy', np.array(celltype_embeddings))
+                        
+                        epoch_loss += float(batch_loss)
+                        num_batches_processed += 1
+                        
+                        # Clear memory after each batch
+                        clear_memory()
+                        
+                    except Exception as e:
+                        logging.error(f"Error in batch {i} of epoch {epoch + 1}: {str(e)}")
+                        continue
+                
+                # Skip epoch if no successful batches
+                if num_batches_processed == 0:
+                    logging.error(f"No successful batches in epoch {epoch + 1}")
+                    continue
+                
+                # Compute average epoch loss
+                avg_epoch_loss = epoch_loss / num_batches_processed
+                
+                # Update history
+                history['epoch'].append(epoch + 1)
+                history['loss'].append(avg_epoch_loss)
+                history['best_loss'].append(min(avg_epoch_loss, best_loss))
+                
+                # Log progress
+                logging.info(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_epoch_loss:.4f}")
+                
+                # Save best model
+                if avg_epoch_loss < (best_loss - min_delta):
+                    best_loss = avg_epoch_loss
+                    best_params = params
+                    checkpoint_path = "checkpoints/best_model.pkl"
+                    with open(checkpoint_path, 'wb') as f:
+                        pickle.dump({
+                            'params': params,
+                            'loss': avg_epoch_loss
+                        }, f)
+                    logging.info(f"Saved new best model with loss: {best_loss:.4f}")
+                    no_improvement_count = 0
+                else:
+                    no_improvement_count += 1
+                    if no_improvement_count >= patience:
+                        logging.info(f"Early stopping triggered after {epoch + 1} epochs")
+                        break
+                
+                # Save checkpoints every 5 epochs
+                if (epoch + 1) % 5 == 0:
+                    checkpoint_path = f"checkpoints/epoch_{epoch + 1}.pkl"
+                    with open(checkpoint_path, 'wb') as f:
+                        pickle.dump({
+                            'params': params,
+                            'loss': avg_epoch_loss
+                        }, f)
+                    logging.info(f"Saved checkpoint for epoch {epoch + 1}")
                 
                 # Clear memory after each epoch
                 clear_memory()
@@ -417,20 +348,18 @@ def train(params, forward_fn, tokenizer, config, num_epochs=50, batch_size=1, le
                 logging.error(f"Error in epoch {epoch + 1}: {str(e)}")
                 continue
         
-        # Save final models
+        # Save final model
         final_checkpoint = "checkpoints/final_model.pkl"
         with open(final_checkpoint, 'wb') as f:
             pickle.dump({
-                'pseudobulk_params': best_pseudobulk_params,
-                'celltype_params': best_celltype_params,
-                'pseudobulk_loss': best_pseudobulk_loss,
-                'celltype_loss': best_celltype_loss
+                'params': best_params,
+                'loss': best_loss
             }, f)
         
         history_df = pd.DataFrame(history)
         history_df.to_csv('training_history.csv', index=False)
         
-        return best_pseudobulk_params, best_celltype_params, history
+        return best_params, history
         
     except Exception as e:
         logging.error(f"Error in training: {str(e)}")
@@ -458,7 +387,7 @@ def main():
         config.use_gradient_checkpointing = True
         
         # Train model
-        best_pseudobulk_params, best_celltype_params, history = train(
+        best_params, history = train(
             parameters,
             forward_fn,
             tokenizer,
@@ -468,17 +397,8 @@ def main():
             learning_rate=1e-4
         )
         
-        # Save final combined model
-        final_model_path = "checkpoints/final_combined_model.pkl"
-        with open(final_model_path, 'wb') as f:
-            pickle.dump({
-                'pseudobulk_params': best_pseudobulk_params,
-                'celltype_params': best_celltype_params,
-                'config': config
-            }, f)
-        
         logging.info("Training completed successfully!")
-        logging.info(f"Best models saved in checkpoints directory")
+        logging.info(f"Best model saved in checkpoints directory")
         logging.info(f"Training history saved to training_history.csv")
         
     except Exception as e:
