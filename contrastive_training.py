@@ -42,31 +42,36 @@ mesh_shape = (NUM_DEVICES,)
 
 # Define partition specs
 param_spec = P('model')  # Parameters are sharded across model dimension
-batch_spec = P(None)     # Batch dimension is not sharded
+batch_spec = P('model')  # Batch dimension is also sharded
 
 def shard_params(params):
     """Shard parameters across devices."""
     def shard_param(param):
         if len(param.shape) > 1:  # Only shard parameters with multiple dimensions
             # For transformer parameters, shard along the hidden dimension
-            # This is typically the last dimension for weight matrices
             if 'embeddings' in str(param):  # Special handling for embeddings
-                # Don't shard embeddings, they need to stay together
+                # Shard embeddings along the last dimension
+                if param.shape[-1] >= NUM_DEVICES:
+                    return jax.device_put_sharded(
+                        jnp.split(param, NUM_DEVICES, axis=-1),
+                        devices
+                    )
                 return param
             else:  # For all other parameters
                 # Try to shard along the largest dimension
                 dim_sizes = param.shape
                 max_dim = max(range(len(dim_sizes)), key=lambda i: dim_sizes[i])
                 if dim_sizes[max_dim] >= NUM_DEVICES:
+                    # Calculate shard size and padding if needed
                     shard_size = (dim_sizes[max_dim] + NUM_DEVICES - 1) // NUM_DEVICES
                     if dim_sizes[max_dim] % NUM_DEVICES != 0:
                         pad_size = shard_size * NUM_DEVICES - dim_sizes[max_dim]
                         padding = [(0, 0)] * max_dim + [(0, pad_size)] + [(0, 0)] * (len(param.shape) - max_dim - 1)
                         param = jnp.pad(param, padding)
-                    return jax.device_put_sharded(
-                        jnp.split(param, NUM_DEVICES, axis=max_dim),
-                        devices
-                    )
+                    
+                    # Split and distribute across devices
+                    splits = jnp.split(param, NUM_DEVICES, axis=max_dim)
+                    return jax.device_put_sharded(splits, devices)
         return param
     
     return jax.tree_map(shard_param, params)
@@ -85,27 +90,20 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
                     pseudobulk_outs = forward_fn.apply(params, rng_key, pseudobulk_batch)
                     celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
                     
-                    # Get embeddings and reshape to match expected shape [64, 256]
-                    # First take mean across attention heads, then handle sequence length
-                    pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=0)  # Shape: (64, 64)
-                    celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=0)      # Shape: (64, 64)
-                    
-                    # Now reshape to match expected shape
-                    pseudobulk_embeddings = pseudobulk_embeddings.reshape(64, -1)  # Shape: (64, 64)
-                    celltype_embeddings = celltype_embeddings.reshape(64, -1)      # Shape: (64, 64)
+                    # Get embeddings and handle dimensions properly
+                    # Shape: (4, 64, 64) -> (64,)
+                    pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=(0, 1))  # Average across attention heads and sequence length
+                    celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=(0, 1))      # Average across attention heads and sequence length
                     
                     def loss_fn(params):
                         # Forward pass for both batches
                         pseudobulk_outs = forward_fn.apply(params, rng_key, pseudobulk_batch)
                         celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
                         
-                        # Get embeddings and reshape to match expected shape [64, 256]
-                        pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=0)  # Shape: (64, 64)
-                        celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=0)      # Shape: (64, 64)
-                        
-                        # Now reshape to match expected shape
-                        pseudobulk_embeddings = pseudobulk_embeddings.reshape(64, -1)  # Shape: (64, 64)
-                        celltype_embeddings = celltype_embeddings.reshape(64, -1)      # Shape: (64, 64)
+                        # Get embeddings and handle dimensions properly
+                        # Shape: (4, 64, 64) -> (64,)
+                        pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=(0, 1))  # Average across attention heads and sequence length
+                        celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=(0, 1))      # Average across attention heads and sequence length
                         
                         # Compute contrastive loss in both directions
                         pseudobulk_loss, celltype_loss = compute_contrastive_loss(
@@ -209,11 +207,26 @@ def load_and_preprocess_data(pseudobulk_path, celltype_path, config, tokenizer):
     return pseudobulk_tokens, celltype_tokens, pseudobulk_donor_indices, celltype_donor_indices
 
 def create_batches(tokens, batch_size):
-    """Create batches from tokens."""
+    """Create batches from tokens with proper sharding."""
     num_samples = len(tokens)
-    for i in range(0, num_samples, batch_size):
-        end_idx = min(i + batch_size, num_samples)
-        yield tokens[i:end_idx]
+    # Ensure batch size is divisible by number of devices
+    effective_batch_size = (batch_size // NUM_DEVICES) * NUM_DEVICES
+    if effective_batch_size == 0:
+        effective_batch_size = NUM_DEVICES
+    
+    for i in range(0, num_samples, effective_batch_size):
+        end_idx = min(i + effective_batch_size, num_samples)
+        batch = tokens[i:end_idx]
+        
+        # Pad batch if needed to make it divisible by NUM_DEVICES
+        if len(batch) % NUM_DEVICES != 0:
+            pad_size = NUM_DEVICES - (len(batch) % NUM_DEVICES)
+            padding = [(0, pad_size)] + [(0, 0)] * (len(batch.shape) - 1)
+            batch = jnp.pad(batch, padding)
+        
+        # Reshape batch for sharding
+        batch = batch.reshape(NUM_DEVICES, -1, *batch.shape[1:])
+        yield batch
 
 def clear_memory():
     """Aggressive memory clearing function."""
