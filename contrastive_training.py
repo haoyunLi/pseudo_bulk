@@ -80,24 +80,20 @@ def shard_params(params):
     """Shard parameters across devices."""
     def shard_param(param):
         if len(param.shape) > 1:  # Only shard parameters with multiple dimensions
-            # For transformer parameters, shard along the hidden dimension
-            if 'embeddings' in str(param):  # Special handling for embeddings
-                return param
-            else:  # For all other parameters
-                # Try to shard along the largest dimension
-                dim_sizes = param.shape
-                max_dim = max(range(len(dim_sizes)), key=lambda i: dim_sizes[i])
-                if dim_sizes[max_dim] >= NUM_DEVICES:
-                    # Calculate shard size and padding if needed
-                    shard_size = (dim_sizes[max_dim] + NUM_DEVICES - 1) // NUM_DEVICES
-                    if dim_sizes[max_dim] % NUM_DEVICES != 0:
-                        pad_size = shard_size * NUM_DEVICES - dim_sizes[max_dim]
-                        padding = [(0, 0)] * max_dim + [(0, pad_size)] + [(0, 0)] * (len(param.shape) - max_dim - 1)
-                        param = jnp.pad(param, padding)
-                    
-                    # Split and distribute across devices
-                    splits = jnp.split(param, NUM_DEVICES, axis=max_dim)
-                    return jax.device_put_sharded(splits, devices)
+            # Try to shard along the largest dimension
+            dim_sizes = param.shape
+            max_dim = max(range(len(dim_sizes)), key=lambda i: dim_sizes[i])
+            if dim_sizes[max_dim] >= NUM_DEVICES:
+                # Calculate shard size and padding if needed
+                shard_size = (dim_sizes[max_dim] + NUM_DEVICES - 1) // NUM_DEVICES
+                if dim_sizes[max_dim] % NUM_DEVICES != 0:
+                    pad_size = shard_size * NUM_DEVICES - dim_sizes[max_dim]
+                    padding = [(0, 0)] * max_dim + [(0, pad_size)] + [(0, 0)] * (len(param.shape) - max_dim - 1)
+                    param = jnp.pad(param, padding)
+                
+                # Split and distribute across devices
+                splits = jnp.split(param, NUM_DEVICES, axis=max_dim)
+                return jax.device_put_sharded(splits, devices)
         return param
     
     return jax.tree_map(shard_param, params)
@@ -135,12 +131,13 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
             out_axis_resources=(None, (None, None))
         )
         
-        # Compute gradients
-        grad_fn = jax.value_and_grad(sharded_loss_fn, has_aux=True)
-        (loss, (pseudobulk_embeddings, celltype_embeddings)), grads = grad_fn(
-            sharded_params, opt_state, pseudobulk_batch, celltype_batch, 
-            forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors
-        )
+        # Compute gradients within mesh context
+        with mesh:
+            grad_fn = jax.value_and_grad(sharded_loss_fn, has_aux=True)
+            (loss, (pseudobulk_embeddings, celltype_embeddings)), grads = grad_fn(
+                sharded_params, opt_state, pseudobulk_batch, celltype_batch, 
+                forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors
+            )
         
         # Update parameters
         updates, opt_state = optimizer.update(grads, opt_state, params)
@@ -403,8 +400,9 @@ def main():
         # Enable gradient checkpointing
         config.use_gradient_checkpointing = True
         
-        # Shard initial parameters
-        parameters = shard_params(parameters)
+        # Shard initial parameters within mesh context
+        with mesh:
+            parameters = shard_params(parameters)
         
         # Train model
         best_params, history = train(
