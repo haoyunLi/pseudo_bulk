@@ -128,9 +128,19 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
             
             return loss, (pseudobulk_embeddings, celltype_embeddings)
         
+        # Create pjit function with sharding specs
+        sharded_loss_fn = pjit(
+            loss_fn,
+            in_axis_resources=(param_spec, None, None, None, None, None, None, None),
+            out_axis_resources=(None, (None, None))
+        )
+        
         # Compute gradients
-        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-        (loss, (pseudobulk_embeddings, celltype_embeddings)), grads = grad_fn(params)
+        grad_fn = jax.value_and_grad(sharded_loss_fn, has_aux=True)
+        (loss, (pseudobulk_embeddings, celltype_embeddings)), grads = grad_fn(
+            sharded_params, opt_state, pseudobulk_batch, celltype_batch, 
+            forward_fn, optimizer, rng_key, pseudobulk_donors, celltype_donors
+        )
         
         # Update parameters
         updates, opt_state = optimizer.update(grads, opt_state, params)
@@ -393,6 +403,9 @@ def main():
         # Enable gradient checkpointing
         config.use_gradient_checkpointing = True
         
+        # Shard initial parameters
+        parameters = shard_params(parameters)
+        
         # Train model
         best_params, history = train(
             parameters,
@@ -400,7 +413,7 @@ def main():
             tokenizer,
             config,
             num_epochs=50,
-            batch_size=1,  # Keep batch size at 1
+            batch_size=1,
             learning_rate=1e-4
         )
         
