@@ -32,7 +32,7 @@ jax.config.update('jax_enable_custom_prng', True)
 
 # Initialize distributed training
 devices = jax.devices()
-print(f"Available devices: {devices}")
+logging.info(f"Available devices: {devices}")
 NUM_DEVICES = len(devices)
 
 # Create mesh for model parallelism
@@ -58,8 +58,8 @@ def compute_contrastive_loss(embeddings1, embeddings2, labels1, labels2, tempera
         loss: Contrastive loss value
     """
     # Normalize embeddings
-    embeddings1 = embeddings1 / jnp.linalg.norm(embeddings1, axis=1, keepdims=True)
-    embeddings2 = embeddings2 / jnp.linalg.norm(embeddings2, axis=1, keepdims=True)
+    embeddings1 = embeddings1 / (jnp.linalg.norm(embeddings1, axis=-1, keepdims=True) + 1e-8)
+    embeddings2 = embeddings2 / (jnp.linalg.norm(embeddings2, axis=-1, keepdims=True) + 1e-8)
     
     # Compute similarity matrix
     similarity_matrix = jnp.matmul(embeddings1, embeddings2.T) / temperature
@@ -114,8 +114,9 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
             celltype_outs = forward_fn.apply(params, rng_key, celltype_batch)
             
             # Get embeddings and handle dimensions properly
-            pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=(0, 1))  # Average across attention heads and sequence length
-            celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=(0, 1))      # Average across attention heads and sequence length
+            # Shape: (batch_size, num_heads, seq_len, hidden_dim) -> (batch_size, hidden_dim)
+            pseudobulk_embeddings = pseudobulk_outs["embeddings_4"].mean(axis=(1, 2))
+            celltype_embeddings = celltype_outs["embeddings_4"].mean(axis=(1, 2))
             
             # Compute contrastive loss
             loss = compute_contrastive_loss(
@@ -273,6 +274,12 @@ def train(params, forward_fn, tokenizer, config, num_epochs=50, batch_size=1, le
                         pseudobulk_batch_donors = pseudobulk_donors[batch_start:batch_end]
                         celltype_batch_donors = celltype_donors[batch_start:batch_end]
                         
+                        # Ensure batch dimensions are correct
+                        if len(pseudobulk_batch.shape) == 1:
+                            pseudobulk_batch = pseudobulk_batch.reshape(1, -1)
+                        if len(celltype_batch.shape) == 1:
+                            celltype_batch = celltype_batch.reshape(1, -1)
+                        
                         # Training step
                         params, opt_state, pseudobulk_embeddings, celltype_embeddings, batch_loss = train_step(
                             params, opt_state,
@@ -393,7 +400,7 @@ def main():
             tokenizer,
             config,
             num_epochs=50,
-            batch_size=1,
+            batch_size=1,  # Keep batch size at 1
             learning_rate=1e-4
         )
         
