@@ -42,7 +42,7 @@ mesh_shape = (NUM_DEVICES,)
 
 # Define partition specs
 param_spec = P('model')  # Parameters are sharded across model dimension
-batch_spec = P('model')  # Batch dimension is also sharded
+batch_spec = P(None)     # Batch dimension is not sharded
 
 def shard_params(params):
     """Shard parameters across devices."""
@@ -50,12 +50,7 @@ def shard_params(params):
         if len(param.shape) > 1:  # Only shard parameters with multiple dimensions
             # For transformer parameters, shard along the hidden dimension
             if 'embeddings' in str(param):  # Special handling for embeddings
-                # Shard embeddings along the last dimension
-                if param.shape[-1] >= NUM_DEVICES:
-                    return jax.device_put_sharded(
-                        jnp.split(param, NUM_DEVICES, axis=-1),
-                        devices
-                    )
+                # Don't shard embeddings, they need to stay together
                 return param
             else:  # For all other parameters
                 # Try to shard along the largest dimension
@@ -141,7 +136,7 @@ def train_step(params, opt_state, pseudobulk_batch, celltype_batch, forward_fn, 
         # Create pjit function with sharding specs
         sharded_train_step = pjit(
             sharded_compute,
-            in_axis_resources=(param_spec, None, batch_spec, batch_spec, None, None, None, None),
+            in_axis_resources=(param_spec, None, None, None, None, None, None, None),  # Only shard parameters
             out_axis_resources=(param_spec, None, None, None, None)
         )
         
